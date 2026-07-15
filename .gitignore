@@ -1,0 +1,8 @@
+.idea/
+.vscode/
+.worktrees/
+*.so
+*.dylib
+*.dll
+*.h
+.DS_Store
