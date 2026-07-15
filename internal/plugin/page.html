@@ -152,21 +152,20 @@
     }
     .key-table td { padding: 10px; border-bottom: 1px solid var(--border-subtle); vertical-align: top; }
     .key-table tr:last-child td { border-bottom: none; }
-    .key-cell {
-      font-family: var(--font-mono); font-size: 12.5px; white-space: nowrap;
-      position: relative;
-    }
+    .key-cell { font-family: var(--font-mono); font-size: 12.5px; white-space: nowrap; }
+    .key-cell .key-wrap { position: relative; display: inline-block; vertical-align: middle; }
     .key-cell .key-text {
-      display: inline-block; vertical-align: middle; max-width: 20ch;
+      display: block; max-width: 20ch;
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
-    .key-cell .key-text[data-tip] { cursor: help; }
-    .key-cell .key-text[data-tip]:hover::after {
+    .key-cell .key-wrap[data-tip] { cursor: help; }
+    .key-cell .key-wrap[data-tip]:hover::after {
       content: attr(data-tip);
       position: absolute; left: 0; top: calc(100% + 4px); z-index: 20;
+      width: max-content; max-width: 480px;
       padding: 8px 10px; background: var(--text-primary); color: var(--bg-elevated);
       border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: 12px;
-      line-height: 1.5; max-width: 480px; white-space: normal;
+      line-height: 1.5; white-space: normal;
       word-break: break-all; overflow-wrap: anywhere;
       box-shadow: var(--shadow-md); pointer-events: none;
     }
@@ -564,14 +563,16 @@
 
       const keyTd = document.createElement('td');
       keyTd.className = 'key-cell';
+      const keyWrap = document.createElement('span');
+      keyWrap.className = 'key-wrap';
       const keyText = document.createElement('span');
       keyText.className = 'key-text';
       keyText.textContent = row.key;
+      keyWrap.appendChild(keyText);
       if (row.key.length > 20) {
-        keyText.setAttribute('data-tip', row.key);
-        keyText.setAttribute('title', row.key);
+        keyWrap.setAttribute('data-tip', row.key);
       }
-      keyTd.appendChild(keyText);
+      keyTd.appendChild(keyWrap);
       if (row.orphan) {
         const tag = document.createElement('span');
         tag.className = 'orphan-tag';
