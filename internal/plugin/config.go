@@ -13,6 +13,11 @@ type Config struct {
 	// unrestricted; every key (listed or not) must additionally be present
 	// in the host api-keys list to be accepted at all.
 	Rules map[string]Rule
+	// AllowedOrigins lists trusted origins that may iframe the panel and
+	// make cross-origin requests to /state and /apply. Empty means the
+	// strictest default: iframe embedding is denied (frame-ancestors 'none')
+	// and cross-origin browser requests are rejected.
+	AllowedOrigins []string
 }
 
 // Rule is the per-key allow list.
@@ -23,7 +28,8 @@ type Rule struct {
 }
 
 type yamlConfig struct {
-	Keys []yamlKey `yaml:"keys"`
+	Keys           []yamlKey `yaml:"keys"`
+	AllowedOrigins string    `yaml:"allowed_origins"`
 }
 
 type yamlKey struct {
@@ -63,7 +69,36 @@ func ParseConfig(raw []byte) (Config, error) {
 		}
 		out.Rules[key] = Rule{Patterns: patterns}
 	}
+	out.AllowedOrigins = parseOrigins(parsed.AllowedOrigins)
 	return out, nil
+}
+
+// parseOrigins splits a comma-separated origin list, trims whitespace and
+// trailing slashes, and drops duplicates while preserving first-seen order.
+// A blank input returns nil so callers can compare against the empty default.
+func parseOrigins(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, 4)
+	for _, part := range strings.Split(raw, ",") {
+		origin := strings.TrimSpace(part)
+		if origin == "" {
+			continue
+		}
+		origin = strings.TrimRight(origin, "/")
+		if _, dup := seen[origin]; dup {
+			continue
+		}
+		seen[origin] = struct{}{}
+		out = append(out, origin)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // RuleForKey looks up the rule for an API key.

@@ -12,12 +12,14 @@ import (
 )
 
 func fakeHostKeys(keys ...string) HostKeysResolver {
+	ordered := append([]string(nil), keys...)
 	set := make(map[string]struct{}, len(keys))
 	for _, key := range keys {
 		set[key] = struct{}{}
 	}
-	return func() (map[string]struct{}, error) {
-		return set, nil
+	snapshot := HostKeysSnapshot{Ordered: ordered, Set: set}
+	return func() (HostKeysSnapshot, error) {
+		return snapshot, nil
 	}
 }
 
@@ -194,8 +196,8 @@ keys:
 func TestAuthenticateFailsClosedWhenHostKeysUnavailable(t *testing.T) {
 	t.Parallel()
 
-	failing := func() (map[string]struct{}, error) {
-		return nil, errors.New("boom")
+	failing := func() (HostKeysSnapshot, error) {
+		return HostKeysSnapshot{}, errors.New("boom")
 	}
 	service := New("1.0.0", nil, failing)
 	resp := service.Authenticate(pluginapi.FrontendAuthRequest{
@@ -263,11 +265,22 @@ func TestManagementRegisterExposesPanelResource(t *testing.T) {
 	service := New("1.0.0", nil, fakeHostKeys())
 	var registration managementRegistration
 	decodeEnvelope(t, service.Call(pluginabi.MethodManagementRegister, nil), &registration)
-	if len(registration.Resources) != 1 {
-		t.Fatalf("resources = %+v", registration.Resources)
+	paths := map[string]resourceDeclaration{}
+	for _, res := range registration.Resources {
+		paths[res.Path] = res
 	}
-	if registration.Resources[0].Path != "/panel" || registration.Resources[0].Menu == "" {
-		t.Fatalf("panel resource = %+v", registration.Resources[0])
+	panel, okPanel := paths["/panel"]
+	if !okPanel || panel.Menu == "" {
+		t.Fatalf("panel resource must be a menu entry, got %+v", panel)
+	}
+	for _, sub := range []string{"/state", "/apply"} {
+		res, ok := paths[sub]
+		if !ok {
+			t.Fatalf("missing resource %q, got %+v", sub, registration.Resources)
+		}
+		if res.Menu != "" {
+			t.Fatalf("%q must not surface as a menu entry, got %+v", sub, res)
+		}
 	}
 }
 

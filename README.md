@@ -19,9 +19,13 @@ rule for a key missing from `api-keys` never admits it.
 
 The plugin also ships a **Model Limiter** menu page for the official
 management panel: it lists every host API key, shows which are restricted,
-and lets you edit model patterns per key. Edits are saved through the host
-management API (`PATCH /v0/management/plugins/model-limiter/config`) with
-your management key and hot-reload immediately.
+and lets you edit model patterns per key. The page auto-loads without a
+management key and saves rule changes by rewriting `config.yaml` directly.
+The host detects the file change and hot-reloads the plugin configuration
+immediately. See [Panel endpoints](#panel-endpoints) below — the read/write
+endpoints are **unauthenticated at the host layer**, but the panel denies
+iframe embedding and rejects cross-origin browser requests by default
+(configurable via `allowed_origins`).
 
 ## Requirements
 
@@ -49,8 +53,8 @@ plugins:
         name: Model Limiter
         description: Restrict which models each inbound API key may use.
         author: berry-shake
-        version: 0.1.1
-        release-tag: v0.1.1
+        version: 0.1.3
+        release-tag: v0.1.3
         repository: https://github.com/berry-shake/cpa-model-limiter-plugin
         install:
           type: github-release
@@ -77,6 +81,7 @@ plugins:
 | Key | Type | Description |
 | --- | --- | --- |
 | `keys` | list | Restriction rules. Each entry has `api-key` (string, required, unique) and `models` (string list, optional). `*` wildcards are allowed in model patterns. An empty or missing `models` list allows every model for that key. The key must also exist in the host `api-keys` list; a rule alone never grants access. Keys without a rule are unrestricted. |
+| `allowed_origins` | string | Comma-separated list of trusted origins that may iframe the panel and call `/state`/`/apply` cross-origin. Blank (default) applies the strictest posture: iframe embedding is denied via `frame-ancestors 'none'` and cross-origin browser requests are rejected. |
 
 Example — `sk-team-a` and `sk-team-b` are model-restricted; all keys,
 restricted or not, stay in the host `api-keys` list:
@@ -105,7 +110,43 @@ plugins:
 ```
 
 Prefer editing rules on the **Model Limiter** menu page of the management
-panel; it validates input and saves through the management API.
+panel; it validates input and writes `config.yaml` directly.
+
+### Panel endpoints
+
+The panel page is served at `/v0/resource/plugins/model-limiter/panel` and
+talks to two same-origin JSON endpoints:
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/v0/resource/plugins/model-limiter/state` | Returns `{plugin_version, api_keys, rules}`. |
+| GET | `/v0/resource/plugins/model-limiter/apply?rules=<base64url json>` | Parses the payload (`[{"api_key":"...","models":[...]}]`), rewrites `config.yaml`, and returns the updated state. Pass `rules=W10` (base64 of `[]`) to clear every rule. |
+
+Both endpoints are **unauthenticated at the host layer** — the host restricts
+`/v0/resource/*` routes to `GET`, so writes are encoded in the query string.
+The plugin defends browsers on top of that:
+
+- The panel page ships with `Content-Security-Policy: frame-ancestors 'none'`
+  by default, so no other page can iframe it.
+- `/state` and `/apply` reject cross-origin browser requests unless the
+  request's `Origin` (falling back to `Referer`) matches `allowed_origins`.
+  Detection uses `Sec-Fetch-Site` first, then `Origin`; requests without any
+  browser context headers (CLI tools) still pass so the endpoints remain
+  scriptable from the host.
+
+Add trusted origins with `allowed_origins`:
+
+```yaml
+plugins:
+  configs:
+    model-limiter:
+      allowed_origins: "https://ops.example.com,https://intranet.example.com"
+```
+
+Anyone reaching the HTTP port from a non-browser client (`curl`, scripts) can
+still read the api-keys list and rewrite the rule set. Bind the server to a
+trusted network, put it behind a proxy that enforces auth on
+`/v0/resource/*`, or disable the plugin if that trade-off is unacceptable.
 
 Behavior notes:
 
@@ -151,7 +192,7 @@ unrestricted keys):
 ```bash
 go test ./...
 go build -buildmode=c-shared \
-  -ldflags '-X main.pluginVersion=0.1.1-dev' \
+  -ldflags '-X main.pluginVersion=0.1.3-dev' \
   -o model-limiter.dylib .
 ```
 
@@ -160,9 +201,17 @@ C header; the host does not need it.
 
 ## Security notes
 
-- The management panel page never stores your management key beyond the
-  browser session (`sessionStorage`); all edits go through the
-  management-key-authenticated host API.
+- The panel page needs no management key: `/state` and `/apply` are
+  unauthenticated at the host layer. Browsers are gated by the panel's
+  `frame-ancestors 'none'` CSP and by the cross-origin check on
+  `/state`/`/apply`; both open up when `allowed_origins` is set. Non-browser
+  clients (curl, scripts) bypass the browser checks — restrict network
+  exposure accordingly (loopback bind, VPN, or an auth-enforcing reverse
+  proxy on `/v0/resource/*`).
+- Writes go straight to `config.yaml` using an atomic temp-file rename so
+  concurrent readers never see a partial file. Comments and unrelated
+  settings are preserved by rewriting only the `plugins.configs.model-limiter.keys`
+  subtree.
 - API keys live in the host `config.yaml` under `api-keys` and
   `plugins.configs`; protect the file accordingly.
 - Logs mask keys (`sk-a****klmn`) and never include full credentials.

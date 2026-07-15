@@ -36,18 +36,19 @@ func TestResolveConfigFile(t *testing.T) {
 func TestParseHostAPIKeys(t *testing.T) {
 	t.Parallel()
 
-	keys, errParse := parseHostAPIKeys([]byte("port: 8317\napi-keys:\n  - sk-one\n  - '  sk-two  '\n  - ''\n"))
+	snap, errParse := parseHostAPIKeys([]byte("port: 8317\napi-keys:\n  - sk-one\n  - '  sk-two  '\n  - ''\n  - sk-one\n"))
 	if errParse != nil {
 		t.Fatal(errParse)
 	}
-	if len(keys) != 2 {
-		t.Fatalf("keys = %v", keys)
+	// Order must match config.yaml; duplicates and blanks are dropped.
+	if len(snap.Ordered) != 2 || snap.Ordered[0] != "sk-one" || snap.Ordered[1] != "sk-two" {
+		t.Fatalf("ordered = %v", snap.Ordered)
 	}
-	if _, ok := keys["sk-one"]; !ok {
-		t.Fatal("sk-one missing")
+	if _, ok := snap.Set["sk-one"]; !ok {
+		t.Fatal("sk-one missing from set")
 	}
-	if _, ok := keys["sk-two"]; !ok {
-		t.Fatal("sk-two should be trimmed and kept")
+	if _, ok := snap.Set["sk-two"]; !ok {
+		t.Fatal("sk-two should be trimmed and kept in set")
 	}
 
 	if _, errBad := parseHostAPIKeys([]byte(":\tnot yaml")); errBad == nil {
@@ -65,24 +66,24 @@ func TestHostKeysCacheReloadAndFallback(t *testing.T) {
 	}
 
 	cache := &hostKeysCache{path: path}
-	keys, errResolve := cache.resolve()
+	snap, errResolve := cache.resolve()
 	if errResolve != nil {
 		t.Fatal(errResolve)
 	}
-	if _, ok := keys["sk-one"]; !ok || len(keys) != 1 {
-		t.Fatalf("keys = %v", keys)
+	if _, ok := snap.Set["sk-one"]; !ok || len(snap.Set) != 1 || len(snap.Ordered) != 1 {
+		t.Fatalf("snap = %+v", snap)
 	}
 
 	// A subsequently broken file must not evict the last good snapshot.
 	if errWrite := os.WriteFile(path, []byte(":\tnot yaml"), 0o600); errWrite != nil {
 		t.Fatal(errWrite)
 	}
-	keys, errResolve = cache.resolve()
+	snap, errResolve = cache.resolve()
 	if errResolve != nil {
 		t.Fatal(errResolve)
 	}
-	if _, ok := keys["sk-one"]; !ok {
-		t.Fatalf("broken rewrite should keep last good snapshot, got %v", keys)
+	if _, ok := snap.Set["sk-one"]; !ok {
+		t.Fatalf("broken rewrite should keep last good snapshot, got %+v", snap)
 	}
 
 	// A valid rewrite is picked up. The content length differs from the
@@ -90,24 +91,24 @@ func TestHostKeysCacheReloadAndFallback(t *testing.T) {
 	if errWrite := os.WriteFile(path, []byte("api-keys:\n  - sk-two\n  - sk-extra\n"), 0o600); errWrite != nil {
 		t.Fatal(errWrite)
 	}
-	keys, errResolve = cache.resolve()
+	snap, errResolve = cache.resolve()
 	if errResolve != nil {
 		t.Fatal(errResolve)
 	}
-	if _, ok := keys["sk-two"]; !ok || len(keys) != 2 {
-		t.Fatalf("keys after rewrite = %v", keys)
+	if len(snap.Ordered) != 2 || snap.Ordered[0] != "sk-two" || snap.Ordered[1] != "sk-extra" {
+		t.Fatalf("ordered after rewrite = %v", snap.Ordered)
 	}
 
 	// Deleting the file also falls back to the snapshot.
 	if errRemove := os.Remove(path); errRemove != nil {
 		t.Fatal(errRemove)
 	}
-	keys, errResolve = cache.resolve()
+	snap, errResolve = cache.resolve()
 	if errResolve != nil {
 		t.Fatal(errResolve)
 	}
-	if _, ok := keys["sk-two"]; !ok {
-		t.Fatalf("missing file should keep last good snapshot, got %v", keys)
+	if _, ok := snap.Set["sk-two"]; !ok {
+		t.Fatalf("missing file should keep last good snapshot, got %+v", snap)
 	}
 }
 

@@ -144,14 +144,6 @@
     .btn-primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
     .btn-secondary { background: var(--bg-elevated); color: var(--text-primary); border-color: var(--border-strong); }
     .btn-secondary:hover:not(:disabled) { background: var(--bg-muted); }
-    .connect-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
-    .connect-row input {
-      flex: 1 1 260px; min-width: 200px; padding: 8px 12px; font: inherit;
-      font-family: var(--font-mono); font-size: 13px;
-      border: 1px solid var(--border-strong); border-radius: var(--radius-md);
-      background: var(--bg-inset); color: var(--text-primary); min-height: 36px;
-    }
-    .connect-row input:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
     .key-table { width: 100%; border-collapse: collapse; }
     .key-table th {
       text-align: left; font-size: 11px; font-weight: 700; text-transform: uppercase;
@@ -242,27 +234,12 @@
       </div>
       <div class="health" id="health" data-state="unknown" role="status" aria-live="polite">
         <span class="dot" aria-hidden="true"></span>
-        <span id="health-label" data-i18n="health.disconnected">Not connected</span>
+        <span id="health-label" data-i18n="health.loading">Loading…</span>
       </div>
     </div>
   </header>
 
-  <section class="card" id="connect-card">
-    <div class="card-header">
-      <h2 data-i18n="connect.title">Management key</h2>
-      <span class="hint" data-i18n="connect.hint">Rules are stored in the host config; editing requires the management key.</span>
-    </div>
-    <div class="card-body">
-      <div class="connect-row">
-        <input id="mgmt-key" type="password" autocomplete="current-password" data-i18n-placeholder="connect.placeholder" placeholder="Management key">
-        <button id="connect-button" class="btn btn-primary" type="button">
-          <span class="btn-label" data-i18n="connect.button">Connect</span>
-        </button>
-      </div>
-    </div>
-  </section>
-
-  <section class="card hidden" id="rules-card">
+  <section class="card" id="rules-card">
     <div class="card-header">
       <h2 data-i18n="rules.title">API key rules</h2>
       <span class="hint" data-i18n="rules.hint">A key without patterns is unrestricted. Patterns support * wildcards, e.g. gpt-5*.</span>
@@ -299,7 +276,7 @@
         </button>
       </div>
     </div>
-    <pre class="log" id="log" data-state="idle" data-i18n="log.idle">Connect with the management key to load rules.</pre>
+    <pre class="log" id="log" data-state="idle" data-i18n="log.idle">Loading api-keys and rules…</pre>
   </section>
 
   <footer>
@@ -310,21 +287,17 @@
 <script>
 (() => {
   const LANG_KEY = 'cliproxy-model-limiter-lang';
-  const MGMT_KEY = 'cliproxy-model-limiter-mgmt-key';
+  const STATE_URL = '/v0/resource/plugins/model-limiter/state';
+  const APPLY_URL = '/v0/resource/plugins/model-limiter/apply';
   const messages = {
     en: {
       title: 'Model Limiter · CLI Proxy API',
       'hero.title': 'Model Limiter',
       'hero.subtitle': 'Restrict which models each API key may use.',
-      'health.disconnected': 'Not connected',
+      'health.loading': 'Loading…',
       'health.ok': '{count} keys · {rules} restricted',
       'health.dirty': 'Unsaved changes',
       'health.error': 'Error',
-      'connect.title': 'Management key',
-      'connect.hint': 'Rules are stored in the host config; editing requires the management key.',
-      'connect.placeholder': 'Management key',
-      'connect.button': 'Connect',
-      'connect.working': 'Connecting…',
       'rules.title': 'API key rules',
       'rules.hint': 'A key without patterns is unrestricted. Patterns support * wildcards, e.g. gpt-5*.',
       'rules.colKey': 'API key',
@@ -334,20 +307,20 @@
       'rules.refresh': 'Reload',
       'rules.save': 'Save changes',
       'rules.saving': 'Saving…',
+      'rules.reloading': 'Reloading…',
       'rules.unrestricted': 'All models',
       'rules.restricted': 'Restricted',
       'rules.orphan': 'not in api-keys',
       'rules.addPattern': 'add pattern…',
       'rules.removeRule': 'Remove this rule',
       'dirty.count': '{count} unsaved change(s)',
-      'log.idle': 'Connect with the management key to load rules.',
+      'log.idle': 'Loading api-keys and rules…',
       'log.loading': 'Loading api-keys and rules…',
       'log.loaded': 'Loaded {keys} api-keys, {rules} restriction rule(s).',
       'log.loadFailed': 'Load failed: {msg}',
       'log.saving': 'Saving rules…',
-      'log.saved': 'Rules saved. The host reloads the plugin configuration automatically.',
+      'log.saved': 'Rules saved to config.yml.',
       'log.saveFailed': 'Save failed: {msg}',
-      'log.badKey': 'Connection failed: {msg}',
       'log.orphanWarning': 'Warning: {count} rule(s) reference keys missing from api-keys; they never grant access.',
       'footer.text': 'Managed by the model-limiter plugin',
       'footer.source': 'source',
@@ -356,15 +329,10 @@
       title: '模型限制器 · CLI Proxy API',
       'hero.title': '模型限制器',
       'hero.subtitle': '为每个 API key 限制可用的模型。',
-      'health.disconnected': '未连接',
+      'health.loading': '加载中…',
       'health.ok': '{count} 个 key · {rules} 个受限',
       'health.dirty': '有未保存的修改',
       'health.error': '出错了',
-      'connect.title': '管理密钥',
-      'connect.hint': '规则保存在宿主配置中，编辑需要管理密钥。',
-      'connect.placeholder': '管理密钥',
-      'connect.button': '连接',
-      'connect.working': '连接中…',
       'rules.title': 'API key 规则',
       'rules.hint': '没有模式的 key 不受限制。模式支持 * 通配符，如 gpt-5*。',
       'rules.colKey': 'API key',
@@ -374,21 +342,21 @@
       'rules.refresh': '重新加载',
       'rules.save': '保存修改',
       'rules.saving': '保存中…',
+      'rules.reloading': '重新加载中…',
       'rules.unrestricted': '全部模型',
       'rules.restricted': '受限',
       'rules.orphan': '不在 api-keys 中',
       'rules.addPattern': '添加模式…',
       'rules.removeRule': '删除该规则',
       'dirty.count': '{count} 处未保存的修改',
-      'log.idle': '输入管理密钥连接后即可加载规则。',
+      'log.idle': '正在加载 api-keys 与规则…',
       'log.loading': '正在加载 api-keys 与规则…',
       'log.loaded': '已加载 {keys} 个 api-key、{rules} 条限制规则。',
       'log.loadFailed': '加载失败：{msg}',
       'log.saving': '正在保存规则…',
-      'log.saved': '规则已保存，宿主会自动热重载插件配置。',
+      'log.saved': '规则已保存到 config.yml。',
       'log.saveFailed': '保存失败：{msg}',
-      'log.badKey': '连接失败:{msg}',
-      'log.orphanWarning': '警告:有 {count} 条规则对应的 key 不在 api-keys 中，这些规则不会赋予任何访问权限。',
+      'log.orphanWarning': '警告：有 {count} 条规则对应的 key 不在 api-keys 中，这些规则不会赋予任何访问权限。',
       'footer.text': '由 model-limiter 插件驱动',
       'footer.source': '源代码',
     },
@@ -446,10 +414,6 @@
     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyPanelTheme);
   }
 
-  const connectCard = document.getElementById('connect-card');
-  const rulesCard = document.getElementById('rules-card');
-  const mgmtKeyInput = document.getElementById('mgmt-key');
-  const connectButton = document.getElementById('connect-button');
   const refreshButton = document.getElementById('refresh-button');
   const saveButton = document.getElementById('save-button');
   const rulesBody = document.getElementById('rules-body');
@@ -461,11 +425,10 @@
 
   // state.rows: [{key, patterns: [..], orphan}] — patterns empty = unrestricted.
   const state = {
-    mgmtKey: '',
     rows: [],
     savedSnapshot: '',
     logState: { state: 'idle', key: 'log.idle', params: null },
-    healthState: { state: 'unknown', key: 'health.disconnected', params: null },
+    healthState: { state: 'unknown', key: 'health.loading', params: null },
   };
 
   function setLog(logState, key, params) {
@@ -522,17 +485,8 @@
     setHealth('ok', 'health.ok', { count: hostKeys, rules: restricted });
   }
 
-  async function api(path, options) {
-    const opts = options || {};
-    const headers = Object.assign({}, opts.headers || {});
-    if (state.mgmtKey) headers['Authorization'] = 'Bearer ' + state.mgmtKey;
-    if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
-    const response = await fetch(path, {
-      method: opts.method || 'GET',
-      cache: 'no-store',
-      headers,
-      body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
-    });
+  async function api(url) {
+    const response = await fetch(url, { method: 'GET', cache: 'no-store' });
     const text = await response.text();
     let data;
     try { data = JSON.parse(text); } catch (_) { data = { message: text || ('HTTP ' + response.status) }; }
@@ -540,40 +494,48 @@
     return data;
   }
 
-  function rulesFromConfig(config) {
-    const map = new Map();
-    const list = config && Array.isArray(config.keys) ? config.keys : [];
-    for (const entry of list) {
+  function rowsFromState(payload) {
+    const hostKeys = Array.isArray(payload && payload.api_keys) ? payload.api_keys.map(String) : [];
+    const rules = Array.isArray(payload && payload.rules) ? payload.rules : [];
+    const ruleMap = new Map();
+    for (const entry of rules) {
       if (!entry || typeof entry !== 'object') continue;
-      const key = String(entry['api-key'] || '').trim();
-      if (!key || map.has(key)) continue;
-      const models = Array.isArray(entry.models) ? entry.models.map((m) => String(m).trim()).filter(Boolean) : [];
-      map.set(key, models);
+      const key = String(entry.api_key || '').trim();
+      if (!key || ruleMap.has(key)) continue;
+      const models = Array.isArray(entry.models) ? entry.models.map((m) => String(m).trim().toLowerCase()).filter(Boolean) : [];
+      ruleMap.set(key, models);
     }
-    return map;
+    const rows = hostKeys.map((key) => ({ key, patterns: (ruleMap.get(key) || []).slice(), orphan: false }));
+    for (const [key, models] of ruleMap) {
+      if (!hostKeys.includes(key)) rows.push({ key, patterns: models.slice(), orphan: true });
+    }
+    return rows;
+  }
+
+  function ingestState(payload) {
+    state.rows = rowsFromState(payload);
+    state.savedSnapshot = snapshot();
+    renderRows();
+    const hostKeys = state.rows.filter((row) => !row.orphan).length;
+    const restricted = state.rows.filter((row) => row.patterns.length).length;
+    setLog('ok', 'log.loaded', { keys: hostKeys, rules: restricted });
+    const orphans = state.rows.filter((row) => row.orphan).length;
+    if (orphans) setLog('error', 'log.orphanWarning', { count: orphans });
+    applyOkHealth();
+    refreshDirtyUI();
   }
 
   async function loadAll() {
     setLog('working', 'log.loading');
-    const [keysResp, configResp] = await Promise.all([
-      api('/v0/management/api-keys'),
-      api('/v0/management/plugins/model-limiter/config'),
-    ]);
-    const hostKeys = Array.isArray(keysResp['api-keys']) ? keysResp['api-keys'] : [];
-    const rules = rulesFromConfig(configResp);
-    const rows = hostKeys.map((key) => ({ key, patterns: rules.get(key) || [], orphan: false }));
-    for (const [key, patterns] of rules) {
-      if (!hostKeys.includes(key)) rows.push({ key, patterns, orphan: true });
-    }
-    state.rows = rows;
-    state.savedSnapshot = snapshot();
-    renderRows();
-    const restricted = rows.filter((row) => row.patterns.length).length;
-    setLog('ok', 'log.loaded', { keys: hostKeys.length, rules: restricted });
-    const orphans = rows.filter((row) => row.orphan).length;
-    if (orphans) setLog('error', 'log.orphanWarning', { count: orphans });
-    applyOkHealth();
-    refreshDirtyUI();
+    const payload = await api(STATE_URL);
+    ingestState(payload);
+  }
+
+  function encodeRules(rules) {
+    // btoa handles ASCII only, so route UTF-8 through encodeURIComponent first
+    // to survive any non-ASCII characters that end up in a key or model pattern.
+    const utf8 = unescape(encodeURIComponent(JSON.stringify(rules)));
+    return btoa(utf8).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   }
 
   function renderRows() {
@@ -679,40 +641,16 @@
     }
   }
 
-  async function connect() {
-    const value = mgmtKeyInput.value.trim();
-    if (!value) { mgmtKeyInput.focus(); return; }
-    state.mgmtKey = value;
-    setBusy(connectButton, true, 'connect.working');
-    try {
-      await loadAll();
-      try { sessionStorage.setItem(MGMT_KEY, value); } catch (_) { /* ignore */ }
-      connectCard.classList.add('hidden');
-      rulesCard.classList.remove('hidden');
-    } catch (error) {
-      state.mgmtKey = '';
-      setHealth('error', 'health.error');
-      setLog('error', 'log.badKey', { msg: error.message });
-      rulesCard.classList.remove('hidden');
-    } finally {
-      setBusy(connectButton, false, 'connect.working');
-    }
-  }
-
   async function save() {
-    const keys = state.rows
+    const rules = state.rows
       .filter((row) => row.patterns.length > 0)
-      .map((row) => ({ 'api-key': row.key, models: row.patterns.slice() }));
+      .map((row) => ({ api_key: row.key, models: row.patterns.slice() }));
     setBusy(saveButton, true, 'rules.saving');
     setLog('working', 'log.saving');
     try {
-      await api('/v0/management/plugins/model-limiter/config', {
-        method: 'PATCH',
-        body: { keys: keys.length ? keys : null },
-      });
-      state.savedSnapshot = snapshot();
+      const payload = await api(APPLY_URL + '?rules=' + encodeRules(rules));
+      ingestState(payload);
       setLog('ok', 'log.saved');
-      refreshDirtyUI();
     } catch (error) {
       setLog('error', 'log.saveFailed', { msg: error.message });
       setHealth('error', 'health.error');
@@ -724,14 +662,14 @@
   }
 
   async function reload() {
-    setBusy(refreshButton, true, 'connect.working');
+    setBusy(refreshButton, true, 'rules.reloading');
     try {
       await loadAll();
     } catch (error) {
       setHealth('error', 'health.error');
       setLog('error', 'log.loadFailed', { msg: error.message });
     } finally {
-      setBusy(refreshButton, false, 'connect.working');
+      setBusy(refreshButton, false, 'rules.reloading');
     }
   }
 
@@ -741,9 +679,6 @@
     document.querySelectorAll('[data-i18n]').forEach((el) => {
       if (el === healthLabel || el === log) return;
       el.textContent = t(el.dataset.i18n);
-    });
-    document.querySelectorAll('[data-i18n-placeholder]').forEach((el) => {
-      el.setAttribute('placeholder', t(el.dataset.i18nPlaceholder));
     });
     healthLabel.textContent = t(state.healthState.key, state.healthState.params);
     log.textContent = t(state.logState.key, state.logState.params);
@@ -768,23 +703,14 @@
     btn.addEventListener('click', () => setLang(btn.dataset.lang, true));
   });
 
-  connectButton.addEventListener('click', connect);
-  mgmtKeyInput.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') connect();
-  });
   refreshButton.addEventListener('click', reload);
   saveButton.addEventListener('click', save);
 
   applyStaticI18n();
-
-  // Auto-connect when a key was stored in this browser session.
-  try {
-    const stored = sessionStorage.getItem(MGMT_KEY);
-    if (stored) {
-      mgmtKeyInput.value = stored;
-      connect();
-    }
-  } catch (_) { /* ignore */ }
+  loadAll().catch((error) => {
+    setHealth('error', 'health.error');
+    setLog('error', 'log.loadFailed', { msg: error.message });
+  });
 })();
 </script>
 </body>

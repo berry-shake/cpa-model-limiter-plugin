@@ -11,20 +11,28 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// HostKeysResolver returns the current host api-keys set.
-type HostKeysResolver func() (map[string]struct{}, error)
+// HostKeysSnapshot carries the host api-keys list in the order they appear in
+// config.yaml (for panel display) together with a set for O(1) membership
+// checks on the auth hot path.
+type HostKeysSnapshot struct {
+	Ordered []string
+	Set     map[string]struct{}
+}
+
+// HostKeysResolver returns the current host api-keys snapshot.
+type HostKeysResolver func() (HostKeysSnapshot, error)
 
 // hostKeysCache lazily reads api-keys from the host configuration file and
 // re-parses only when the file changes. When a previously good snapshot
 // exists, transient read or parse failures fall back to it so a broken write
 // never locks every caller out.
 type hostKeysCache struct {
-	mu      sync.Mutex
-	path    string
-	modTime time.Time
-	size    int64
-	keys    map[string]struct{}
-	loaded  bool
+	mu       sync.Mutex
+	path     string
+	modTime  time.Time
+	size     int64
+	snapshot HostKeysSnapshot
+	loaded   bool
 }
 
 // NewHostKeysResolver builds a resolver bound to the host process arguments.
@@ -33,7 +41,13 @@ func NewHostKeysResolver() HostKeysResolver {
 	return cache.resolve
 }
 
-func (c *hostKeysCache) resolve() (map[string]struct{}, error) {
+// HostConfigPath returns the resolved host configuration file path, mirroring
+// the same --config flag parsing the server uses at startup.
+func HostConfigPath() string {
+	return resolveConfigFile(os.Args, os.Getwd)
+}
+
+func (c *hostKeysCache) resolve() (HostKeysSnapshot, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.path == "" {
@@ -42,50 +56,57 @@ func (c *hostKeysCache) resolve() (map[string]struct{}, error) {
 	info, errStat := os.Stat(c.path)
 	if errStat != nil {
 		if c.loaded {
-			return c.keys, nil
+			return c.snapshot, nil
 		}
-		return nil, fmt.Errorf("stat host config: %w", errStat)
+		return HostKeysSnapshot{}, fmt.Errorf("stat host config: %w", errStat)
 	}
 	if c.loaded && info.ModTime().Equal(c.modTime) && info.Size() == c.size {
-		return c.keys, nil
+		return c.snapshot, nil
 	}
 	raw, errRead := os.ReadFile(c.path)
 	if errRead != nil {
 		if c.loaded {
-			return c.keys, nil
+			return c.snapshot, nil
 		}
-		return nil, fmt.Errorf("read host config: %w", errRead)
+		return HostKeysSnapshot{}, fmt.Errorf("read host config: %w", errRead)
 	}
-	keys, errParse := parseHostAPIKeys(raw)
+	snapshot, errParse := parseHostAPIKeys(raw)
 	if errParse != nil {
 		if c.loaded {
-			return c.keys, nil
+			return c.snapshot, nil
 		}
-		return nil, errParse
+		return HostKeysSnapshot{}, errParse
 	}
-	c.keys = keys
+	c.snapshot = snapshot
 	c.modTime = info.ModTime()
 	c.size = info.Size()
 	c.loaded = true
-	return c.keys, nil
+	return c.snapshot, nil
 }
 
-func parseHostAPIKeys(raw []byte) (map[string]struct{}, error) {
+// parseHostAPIKeys returns the api-keys list preserving first-seen order and
+// de-duplicated, alongside a set for membership lookups.
+func parseHostAPIKeys(raw []byte) (HostKeysSnapshot, error) {
 	var parsed struct {
 		APIKeys []string `yaml:"api-keys"`
 	}
 	if errYAML := yaml.Unmarshal(raw, &parsed); errYAML != nil {
-		return nil, fmt.Errorf("parse host config: %w", errYAML)
+		return HostKeysSnapshot{}, fmt.Errorf("parse host config: %w", errYAML)
 	}
-	keys := make(map[string]struct{}, len(parsed.APIKeys))
+	ordered := make([]string, 0, len(parsed.APIKeys))
+	set := make(map[string]struct{}, len(parsed.APIKeys))
 	for _, key := range parsed.APIKeys {
 		key = strings.TrimSpace(key)
 		if key == "" {
 			continue
 		}
-		keys[key] = struct{}{}
+		if _, seen := set[key]; seen {
+			continue
+		}
+		set[key] = struct{}{}
+		ordered = append(ordered, key)
 	}
-	return keys, nil
+	return HostKeysSnapshot{Ordered: ordered, Set: set}, nil
 }
 
 // resolveConfigFile mirrors the host's --config flag parsing so the plugin

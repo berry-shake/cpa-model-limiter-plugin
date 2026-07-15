@@ -2,7 +2,9 @@ package plugin
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 
@@ -15,6 +17,11 @@ const ProviderID = "model-limiter"
 
 const panelPath = "/v0/resource/plugins/model-limiter/panel"
 
+const (
+	configKeys           = "keys"
+	configAllowedOrigins = "allowed_origins"
+)
+
 // LogFunc forwards a log line to the host logger.
 type LogFunc func(level, message string, fields map[string]any)
 
@@ -23,6 +30,7 @@ type Service struct {
 	version  string
 	logFn    LogFunc
 	hostKeys HostKeysResolver
+	writer   *configWriter
 
 	mu  sync.RWMutex
 	cfg Config
@@ -79,7 +87,13 @@ func New(version string, logFn LogFunc, hostKeys HostKeysResolver) *Service {
 	if hostKeys == nil {
 		hostKeys = NewHostKeysResolver()
 	}
-	return &Service{version: version, logFn: logFn, hostKeys: hostKeys, cfg: DefaultConfig()}
+	return &Service{
+		version:  version,
+		logFn:    logFn,
+		hostKeys: hostKeys,
+		writer:   newConfigWriter(HostConfigPath),
+		cfg:      DefaultConfig(),
+	}
 }
 
 // Call handles one plugin RPC method and always returns a JSON envelope.
@@ -96,9 +110,14 @@ func (s *Service) Call(method string, request []byte) []byte {
 				GitHubRepository: "https://github.com/berry-shake/cpa-model-limiter-plugin",
 				ConfigFields: []pluginapi.ConfigField{
 					{
-						Name:        "keys",
+						Name:        configKeys,
 						Type:        pluginapi.ConfigFieldTypeArray,
 						Description: "Restriction rules. Each entry: api-key (string) plus models (string list, * wildcards allowed). The key must also exist in the host api-keys list; a rule alone never grants access. Keys without a rule are unrestricted. Prefer the Model Limiter menu page for editing.",
+					},
+					{
+						Name:        configAllowedOrigins,
+						Type:        pluginapi.ConfigFieldTypeString,
+						Description: "受信任的来源列表（逗号分隔），允许以 iframe 嵌入面板并跨源调用资源接口。留空为最严格默认：禁止任何 iframe 嵌入（frame-ancestors 'none'），并拒绝跨源浏览器请求。",
 					},
 				},
 			},
@@ -122,6 +141,10 @@ func (s *Service) Call(method string, request []byte) []byte {
 		return okEnvelope(managementRegistration{
 			Resources: []resourceDeclaration{
 				{Path: "/panel", Menu: "Model Limiter", Description: "Edit per-key model restrictions."},
+				// /state and /apply back the panel page. Menu is empty so they
+				// stay out of the management panel sidebar.
+				{Path: "/state"},
+				{Path: "/apply"},
 			},
 		})
 	case pluginabi.MethodManagementHandle:
@@ -163,6 +186,55 @@ func (s *Service) snapshot() Config {
 	return s.cfg
 }
 
+// AllowedOrigins returns a defensive copy of the configured trusted origins.
+// An empty result means the strictest default: iframe embedding is denied
+// and cross-origin browser requests to /state and /apply are rejected.
+func (s *Service) AllowedOrigins() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.cfg.AllowedOrigins) == 0 {
+		return nil
+	}
+	out := make([]string, len(s.cfg.AllowedOrigins))
+	copy(out, s.cfg.AllowedOrigins)
+	return out
+}
+
+// Rules returns the current rule set as a stable, sorted slice suitable for
+// JSON serialization by the panel page.
+func (s *Service) Rules() []RuleEntry {
+	snap := s.snapshot()
+	out := make([]RuleEntry, 0, len(snap.Rules))
+	for key, rule := range snap.Rules {
+		models := append([]string(nil), rule.Patterns...)
+		out = append(out, RuleEntry{APIKey: key, Models: models})
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].APIKey < out[j].APIKey })
+	return out
+}
+
+// ApplyRules validates and writes rules to config.yml and updates the
+// in-memory rule set on success. The host may also push a follow-up
+// reconfigure with the same data, which is idempotent.
+func (s *Service) ApplyRules(rules []RuleEntry) ([]RuleEntry, error) {
+	if s.writer == nil {
+		return nil, errors.New("config writer is not initialized")
+	}
+	if errWrite := s.writer.ApplyRules(rules); errWrite != nil {
+		return nil, errWrite
+	}
+	normalized, _ := normalizeRules(rules)
+	cfg := DefaultConfig()
+	for _, rule := range normalized {
+		cfg.Rules[rule.APIKey] = Rule{Patterns: append([]string(nil), rule.Models...)}
+	}
+	s.mu.Lock()
+	s.cfg = cfg
+	s.mu.Unlock()
+	s.logFn("info", "model-limiter: rules updated via panel", map[string]any{"rules": len(cfg.Rules)})
+	return s.Rules(), nil
+}
+
 // Authenticate is the exclusive frontend auth decision. The host api-keys
 // list stays the single source of key validity:
 //
@@ -183,7 +255,7 @@ func (s *Service) Authenticate(req pluginapi.FrontendAuthRequest) pluginapi.Fron
 		s.logFn("error", "model-limiter: cannot read host api-keys, rejecting request", map[string]any{"error": errKeys.Error()})
 		return pluginapi.FrontendAuthResponse{}
 	}
-	if _, known := hostKeys[key]; !known {
+	if _, known := hostKeys.Set[key]; !known {
 		return pluginapi.FrontendAuthResponse{}
 	}
 

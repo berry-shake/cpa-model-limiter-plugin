@@ -89,6 +89,29 @@ func TestMatchWildcardMiddleSegments(t *testing.T) {
 	}
 }
 
+func TestParseConfigAllowedOrigins(t *testing.T) {
+	t.Parallel()
+
+	empty, errEmpty := ParseConfig([]byte("keys: []\n"))
+	if errEmpty != nil {
+		t.Fatal(errEmpty)
+	}
+	if empty.AllowedOrigins != nil {
+		t.Fatalf("missing allowed_origins must yield nil, got %+v", empty.AllowedOrigins)
+	}
+
+	cfg, errParse := ParseConfig([]byte("allowed_origins: 'https://a.example ,  https://b.example/ , https://a.example/'\n"))
+	if errParse != nil {
+		t.Fatal(errParse)
+	}
+	if len(cfg.AllowedOrigins) != 2 {
+		t.Fatalf("origins = %+v", cfg.AllowedOrigins)
+	}
+	if cfg.AllowedOrigins[0] != "https://a.example" || cfg.AllowedOrigins[1] != "https://b.example" {
+		t.Fatalf("origins order/normalization wrong: %+v", cfg.AllowedOrigins)
+	}
+}
+
 func TestMaskKey(t *testing.T) {
 	t.Parallel()
 
