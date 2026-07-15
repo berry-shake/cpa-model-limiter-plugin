@@ -152,9 +152,27 @@
     }
     .key-table td { padding: 10px; border-bottom: 1px solid var(--border-subtle); vertical-align: top; }
     .key-table tr:last-child td { border-bottom: none; }
-    .key-cell { font-family: var(--font-mono); font-size: 12.5px; word-break: break-all; max-width: 420px; }
+    .key-cell {
+      font-family: var(--font-mono); font-size: 12.5px; white-space: nowrap;
+      position: relative;
+    }
+    .key-cell .key-text {
+      display: inline-block; vertical-align: middle; max-width: 20ch;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .key-cell .key-text[data-tip] { cursor: help; }
+    .key-cell .key-text[data-tip]:hover::after {
+      content: attr(data-tip);
+      position: absolute; left: 0; top: calc(100% + 4px); z-index: 20;
+      padding: 8px 10px; background: var(--text-primary); color: var(--bg-elevated);
+      border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: 12px;
+      line-height: 1.5; max-width: 480px; white-space: normal;
+      word-break: break-all; overflow-wrap: anywhere;
+      box-shadow: var(--shadow-md); pointer-events: none;
+    }
     .key-cell .orphan-tag {
-      display: inline-block; margin-left: 6px; padding: 1px 8px; border-radius: 999px;
+      display: inline-block; vertical-align: middle; margin-left: 6px;
+      padding: 1px 8px; border-radius: 999px;
       background: var(--warning-soft); color: var(--warning); font-family: var(--font-sans);
       font-size: 11px; font-weight: 600;
     }
@@ -248,7 +266,7 @@
       <table class="key-table">
         <thead>
           <tr>
-            <th style="width: 44%;" data-i18n="rules.colKey">API key</th>
+            <th data-i18n="rules.colKey">API key</th>
             <th style="width: 12%;" data-i18n="rules.colStatus">Status</th>
             <th data-i18n="rules.colModels">Allowed models</th>
           </tr>
@@ -346,7 +364,7 @@
       'rules.unrestricted': '全部模型',
       'rules.restricted': '受限',
       'rules.orphan': '不在 api-keys 中',
-      'rules.addPattern': '添加模式…',
+      'rules.addPattern': '添加模型…',
       'rules.removeRule': '删除该规则',
       'dirty.count': '{count} 处未保存的修改',
       'log.idle': '正在加载 api-keys 与规则…',
@@ -546,7 +564,14 @@
 
       const keyTd = document.createElement('td');
       keyTd.className = 'key-cell';
-      keyTd.textContent = row.key;
+      const keyText = document.createElement('span');
+      keyText.className = 'key-text';
+      keyText.textContent = row.key;
+      if (row.key.length > 20) {
+        keyText.setAttribute('data-tip', row.key);
+        keyText.setAttribute('title', row.key);
+      }
+      keyTd.appendChild(keyText);
       if (row.orphan) {
         const tag = document.createElement('span');
         tag.className = 'orphan-tag';
