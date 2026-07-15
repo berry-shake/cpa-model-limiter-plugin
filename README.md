@@ -1,22 +1,27 @@
 # CLIProxyAPI Model Limiter Plugin
 
 A CLIProxyAPI frontend auth plugin that restricts which models specific
-inbound API keys may use. It registers as a `FrontendAuthProvider` and
-inspects the API key (headers/query) together with the requested model (JSON
-body `model` field, or the Gemini-style `/models/<model>:<action>` URL path)
-in a single authentication pass.
+inbound API keys may use. It registers as an exclusive `FrontendAuthProvider`
+and inspects the API key (headers/query) together with the requested model
+(JSON body `model` field, or the Gemini-style `/models/<model>:<action>` URL
+path) in a single authentication pass.
 
-Only the keys listed in the plugin config are governed by the plugin; every
-other key keeps flowing through the host `api-keys` provider untouched. When
-the plugin accepts a listed key, authentication succeeds immediately; when it
-rejects one (unknown model), the host access manager falls through to the
-builtin `config-api-key` provider, which denies the key as long as it is not
-listed in `api-keys`.
+The host `api-keys` list stays the single, complete source of key validity —
+restricted keys remain listed there like every other key. The plugin reads
+that list directly from the host configuration file and applies three checks:
 
-**The one rule that keeps enforcement hard: a restricted key must appear only
-in the plugin config, never in the host `api-keys` list.** If a restricted
-key is duplicated into `api-keys`, the fallback path re-admits it for any
-model.
+1. The key must be present in the host `api-keys` list, otherwise reject.
+2. A key without a plugin rule is unrestricted (any model).
+3. A key with a rule may only request models matching its allow patterns.
+
+Rules only subtract capability from keys that `api-keys` already grants; a
+rule for a key missing from `api-keys` never admits it.
+
+The plugin also ships a **Model Limiter** menu page for the official
+management panel: it lists every host API key, shows which are restricted,
+and lets you edit model patterns per key. Edits are saved through the host
+management API (`PATCH /v0/management/plugins/model-limiter/config`) with
+your management key and hot-reload immediately.
 
 ## Requirements
 
@@ -44,8 +49,8 @@ plugins:
         name: Model Limiter
         description: Restrict which models each inbound API key may use.
         author: berry-shake
-        version: 0.1.0
-        release-tag: v0.1.0
+        version: 0.1.1
+        release-tag: v0.1.1
         repository: https://github.com/berry-shake/cpa-model-limiter-plugin
         install:
           type: github-release
@@ -71,16 +76,17 @@ plugins:
 
 | Key | Type | Description |
 | --- | --- | --- |
-| `exclusive` | boolean | Register as the only active frontend auth provider. Defaults to `false`, which is the recommended mode: unlisted keys keep working through the host `api-keys`. Set `true` only to fully replace the host `api-keys` check with the plugin allow list (every valid key must then be listed under `keys`). |
-| `keys` | list | Restricted key rules. Each entry has `api-key` (string, required, unique) and `models` (string list, optional). `*` wildcards are allowed in model patterns. An empty or missing `models` list allows every model for that key. Keys not listed here are handled by the host `api-keys` provider. |
+| `keys` | list | Restriction rules. Each entry has `api-key` (string, required, unique) and `models` (string list, optional). `*` wildcards are allowed in model patterns. An empty or missing `models` list allows every model for that key. The key must also exist in the host `api-keys` list; a rule alone never grants access. Keys without a rule are unrestricted. |
 
-Example — `sk-team-a` and `sk-team-b` are model-restricted, all other keys in
-the host `api-keys` list keep full access:
+Example — `sk-team-a` and `sk-team-b` are model-restricted; all keys,
+restricted or not, stay in the host `api-keys` list:
 
 ```yaml
 api-keys:
-  - sk-admin          # unrestricted keys stay here as usual
-  - sk-ci
+  - sk-admin           # unrestricted
+  - sk-ci              # unrestricted
+  - sk-team-a          # restricted below
+  - sk-team-b          # restricted below
 
 plugins:
   enabled: true
@@ -88,7 +94,7 @@ plugins:
     model-limiter:
       enabled: true
       keys:
-        - api-key: sk-team-a   # restricted keys live ONLY here
+        - api-key: sk-team-a
           models:
             - gpt-5.2
             - claude-*
@@ -97,6 +103,9 @@ plugins:
             - gemini-2.5-flash
             - gemini-2.5-pro
 ```
+
+Prefer editing rules on the **Model Limiter** menu page of the management
+panel; it validates input and saves through the management API.
 
 Behavior notes:
 
@@ -111,20 +120,38 @@ Behavior notes:
 - Requests without a resolvable model (for example `GET /v1/models`) only go
   through the key check.
 - Keys are compared exactly after trimming surrounding whitespace.
-- A failed config reload resets the plugin to empty rules instead of keeping
-  stale ones; restricted keys then fall back to the host `api-keys` provider,
-  where they are not listed and stay denied. The parse error is logged
-  through the host logger.
+- The host `api-keys` list is read from the same config file the server
+  loaded (`--config` flag or `config.yaml` in the working directory) and is
+  cached until the file changes; a transient read or parse failure falls back
+  to the last good snapshot.
+- A failed plugin config reload resets to empty rules instead of keeping
+  stale ones: keys in `api-keys` become temporarily unrestricted rather than
+  locked out. The parse error is logged through the host logger.
 - Rejections surface to clients as HTTP 401 (the host access manager owns the
   error shape), not as a 403 "model not allowed" message. Rejected requests
   are logged with a masked key and the offending model.
+
+## Fail-closed notes
+
+The plugin registers as an *exclusive* frontend auth provider, replacing the
+builtin `config-api-key` check (the decision semantics are identical for
+unrestricted keys):
+
+- If the plugin panics, the host fuses it and every request is denied with
+  401 until the plugin or configuration is reloaded. Auth fails closed, never
+  open.
+- If the host config file cannot be read and no snapshot exists yet, requests
+  are denied and the error is logged.
+- If the host `api-keys` list is empty, the plugin denies all requests. This
+  differs from a pluginless host, which treats empty `api-keys` as
+  "no authentication required".
 
 ## Build locally
 
 ```bash
 go test ./...
 go build -buildmode=c-shared \
-  -ldflags '-X main.pluginVersion=0.1.0-dev' \
+  -ldflags '-X main.pluginVersion=0.1.1-dev' \
   -o model-limiter.dylib .
 ```
 
@@ -133,9 +160,9 @@ C header; the host does not need it.
 
 ## Security notes
 
-- Never duplicate a restricted key into the host `api-keys` list: the
-  fallback path would re-admit it for any model. This is the only invariant
-  the operator must maintain.
-- API keys live in the host `config.yaml` under `plugins.configs`; protect
-  the file accordingly.
+- The management panel page never stores your management key beyond the
+  browser session (`sessionStorage`); all edits go through the
+  management-key-authenticated host API.
+- API keys live in the host `config.yaml` under `api-keys` and
+  `plugins.configs`; protect the file accordingly.
 - Logs mask keys (`sk-a****klmn`) and never include full credentials.

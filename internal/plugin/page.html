@@ -1,0 +1,791 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title data-i18n="title">Model Limiter · CLI Proxy API</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg-base: #f5f4ef;
+      --bg-elevated: #ffffff;
+      --bg-muted: #eeece6;
+      --bg-inset: #f8f7f2;
+      --text-primary: #201f1c;
+      --text-secondary: #6b665f;
+      --text-muted: #96908a;
+      --border-subtle: #e3e1db;
+      --border-strong: #d1cec7;
+      --accent: #2f6bff;
+      --accent-hover: #245ae0;
+      --accent-soft: rgba(47, 107, 255, 0.10);
+      --success: #10a37f;
+      --success-soft: rgba(16, 163, 127, 0.12);
+      --danger: #d0463b;
+      --danger-soft: rgba(208, 70, 59, 0.12);
+      --warning: #c9862c;
+      --warning-soft: rgba(201, 134, 44, 0.14);
+      --shadow-sm: 0 1px 2px rgba(24, 22, 20, 0.05);
+      --shadow-md: 0 4px 12px rgba(24, 22, 20, 0.08);
+      --radius-sm: 6px;
+      --radius-md: 10px;
+      --radius-lg: 14px;
+      --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Roboto Mono", monospace;
+      --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, "Helvetica Neue", Arial, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    }
+    [data-theme='white'] {
+      --bg-base: #ffffff;
+      --bg-elevated: #ffffff;
+      --bg-muted: #f4f4f4;
+      --bg-inset: #fafafa;
+      --border-subtle: #ececec;
+      --border-strong: #d9d9d9;
+    }
+    [data-theme='dark'] {
+      --bg-base: #16151a;
+      --bg-elevated: #1e1d23;
+      --bg-muted: #262530;
+      --bg-inset: #1a1920;
+      --text-primary: #f2f1ee;
+      --text-secondary: #b6b1a8;
+      --text-muted: #7f7a70;
+      --border-subtle: #302f38;
+      --border-strong: #45434f;
+      --accent: #6a92ff;
+      --accent-hover: #86a5ff;
+      --accent-soft: rgba(106, 146, 255, 0.16);
+      --success: #22c39a;
+      --success-soft: rgba(34, 195, 154, 0.18);
+      --danger: #ef6f60;
+      --danger-soft: rgba(239, 111, 96, 0.18);
+      --warning: #e0a144;
+      --warning-soft: rgba(224, 161, 68, 0.18);
+      --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+      --shadow-md: 0 6px 20px rgba(0, 0, 0, 0.45);
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      background: var(--bg-base);
+      color: var(--text-primary);
+      font-family: var(--font-sans);
+      font-size: 14px;
+      line-height: 1.55;
+      -webkit-font-smoothing: antialiased;
+    }
+    main {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 16px 24px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      min-height: 100vh;
+    }
+    header.hero { display: flex; flex-direction: column; gap: 10px; }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .brand-mark {
+      width: 40px; height: 40px; border-radius: 11px;
+      background: var(--accent-soft); color: var(--accent);
+      display: grid; place-items: center; flex-shrink: 0;
+    }
+    .brand-mark svg { width: 20px; height: 20px; }
+    .brand h1 { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: -0.01em; }
+    .brand p { margin: 2px 0 0; color: var(--text-secondary); font-size: 13px; }
+    .hero-side { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .lang-switch {
+      display: inline-flex; background: var(--bg-muted);
+      border: 1px solid var(--border-subtle); border-radius: 999px; padding: 3px;
+    }
+    .lang-switch button {
+      appearance: none; background: transparent; color: var(--text-secondary);
+      border: none; padding: 4px 12px; font: inherit; font-size: 12px; font-weight: 600;
+      border-radius: 999px; cursor: pointer; transition: background-color 0.15s, color 0.15s;
+    }
+    .lang-switch button:hover { color: var(--text-primary); }
+    .lang-switch button.active { background: var(--bg-elevated); color: var(--text-primary); box-shadow: var(--shadow-sm); }
+    .health {
+      display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px;
+      border-radius: 999px; background: var(--bg-muted); color: var(--text-secondary);
+      font-size: 12px; font-weight: 600; border: 1px solid var(--border-subtle);
+    }
+    .health .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); transition: background-color 0.2s; }
+    .health[data-state="ok"] { color: var(--success); background: var(--success-soft); border-color: transparent; }
+    .health[data-state="ok"] .dot { background: var(--success); }
+    .health[data-state="error"] { color: var(--danger); background: var(--danger-soft); border-color: transparent; }
+    .health[data-state="error"] .dot { background: var(--danger); }
+    .health[data-state="dirty"] { color: var(--warning); background: var(--warning-soft); border-color: transparent; }
+    .health[data-state="dirty"] .dot { background: var(--warning); }
+    .card {
+      background: var(--bg-elevated); border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-lg); box-shadow: var(--shadow-sm); overflow: hidden;
+    }
+    .card-header {
+      padding: 12px 18px; border-bottom: 1px solid var(--border-subtle);
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    }
+    .card-header h2 {
+      margin: 0; font-size: 12px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.06em; color: var(--text-secondary);
+    }
+    .card-header .hint { font-size: 12px; color: var(--text-muted); }
+    .card-body { padding: 14px 18px; }
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px;
+      border-radius: var(--radius-md); font: inherit; font-weight: 600; font-size: 13.5px;
+      cursor: pointer; border: 1px solid transparent; min-height: 36px;
+      transition: transform 0.06s, background-color 0.15s, border-color 0.15s, color 0.15s;
+    }
+    .btn svg { width: 15px; height: 15px; }
+    .btn:disabled { opacity: 0.55; cursor: not-allowed; }
+    .btn:not(:disabled):active { transform: translateY(1px); }
+    .btn-primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .btn-primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+    .btn-secondary { background: var(--bg-elevated); color: var(--text-primary); border-color: var(--border-strong); }
+    .btn-secondary:hover:not(:disabled) { background: var(--bg-muted); }
+    .connect-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    .connect-row input {
+      flex: 1 1 260px; min-width: 200px; padding: 8px 12px; font: inherit;
+      font-family: var(--font-mono); font-size: 13px;
+      border: 1px solid var(--border-strong); border-radius: var(--radius-md);
+      background: var(--bg-inset); color: var(--text-primary); min-height: 36px;
+    }
+    .connect-row input:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+    .key-table { width: 100%; border-collapse: collapse; }
+    .key-table th {
+      text-align: left; font-size: 11px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.06em; color: var(--text-muted); padding: 8px 10px;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .key-table td { padding: 10px; border-bottom: 1px solid var(--border-subtle); vertical-align: top; }
+    .key-table tr:last-child td { border-bottom: none; }
+    .key-cell { font-family: var(--font-mono); font-size: 12.5px; word-break: break-all; max-width: 420px; }
+    .key-cell .orphan-tag {
+      display: inline-block; margin-left: 6px; padding: 1px 8px; border-radius: 999px;
+      background: var(--warning-soft); color: var(--warning); font-family: var(--font-sans);
+      font-size: 11px; font-weight: 600;
+    }
+    .badge {
+      display: inline-flex; align-items: center; padding: 2px 10px; border-radius: 999px;
+      font-size: 12px; font-weight: 600; white-space: nowrap;
+    }
+    .badge.unrestricted { background: var(--success-soft); color: var(--success); }
+    .badge.restricted { background: var(--accent-soft); color: var(--accent); }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+    .chip {
+      display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px 3px 10px;
+      background: var(--accent-soft); color: var(--accent); border-radius: 999px;
+      font-family: var(--font-mono); font-size: 12px; font-weight: 600;
+    }
+    .chip button {
+      appearance: none; border: none; background: transparent; color: inherit;
+      cursor: pointer; font-size: 13px; line-height: 1; padding: 0 2px; border-radius: 50%;
+    }
+    .chip button:hover { color: var(--danger); }
+    .chip-input {
+      border: 1px dashed var(--border-strong); background: var(--bg-inset);
+      border-radius: 999px; padding: 3px 10px; font: inherit; font-family: var(--font-mono);
+      font-size: 12px; color: var(--text-primary); width: 130px; min-height: 26px;
+    }
+    .chip-input:focus { outline: none; border-color: var(--accent); border-style: solid; }
+    .chip-input::placeholder { color: var(--text-muted); font-family: var(--font-sans); }
+    .row-actions { display: flex; gap: 6px; }
+    .icon-btn {
+      appearance: none; border: 1px solid var(--border-strong); background: var(--bg-elevated);
+      color: var(--text-secondary); border-radius: var(--radius-sm); cursor: pointer;
+      width: 28px; height: 28px; display: grid; place-items: center;
+    }
+    .icon-btn svg { width: 14px; height: 14px; }
+    .icon-btn:hover { color: var(--danger); border-color: var(--danger); background: var(--danger-soft); }
+    .toolbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
+    .toolbar .spacer { flex: 1; }
+    .log {
+      margin: 0; padding: 10px 18px; background: var(--bg-inset);
+      border-top: 1px solid var(--border-subtle); font-family: var(--font-mono);
+      font-size: 12.5px; color: var(--text-secondary); white-space: pre-wrap;
+      overflow-wrap: anywhere; max-height: 140px; overflow-y: auto;
+    }
+    .log[data-state="ok"] { color: var(--success); background: var(--success-soft); }
+    .log[data-state="error"] { color: var(--danger); background: var(--danger-soft); }
+    .empty { padding: 18px; text-align: center; color: var(--text-muted); font-size: 13px; }
+    .hidden { display: none !important; }
+    footer { margin-top: auto; padding-top: 8px; text-align: center; color: var(--text-muted); font-size: 11px; }
+    footer a { color: inherit; text-decoration: none; border-bottom: 1px dashed var(--border-strong); }
+    footer a:hover { color: var(--text-primary); }
+    @media (max-width: 620px) {
+      main { padding: 12px 12px 20px; }
+      .card-header { flex-direction: column; align-items: flex-start; }
+      .key-cell { max-width: 180px; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header class="hero">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="11" width="18" height="10" rx="2"/>
+          <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+        </svg>
+      </div>
+      <div>
+        <h1 data-i18n="hero.title">Model Limiter</h1>
+        <p data-i18n="hero.subtitle">Restrict which models each API key may use.</p>
+      </div>
+    </div>
+    <div class="hero-side">
+      <div class="lang-switch" role="group" aria-label="Language">
+        <button type="button" data-lang="en">EN</button>
+        <button type="button" data-lang="zh">中文</button>
+      </div>
+      <div class="health" id="health" data-state="unknown" role="status" aria-live="polite">
+        <span class="dot" aria-hidden="true"></span>
+        <span id="health-label" data-i18n="health.disconnected">Not connected</span>
+      </div>
+    </div>
+  </header>
+
+  <section class="card" id="connect-card">
+    <div class="card-header">
+      <h2 data-i18n="connect.title">Management key</h2>
+      <span class="hint" data-i18n="connect.hint">Rules are stored in the host config; editing requires the management key.</span>
+    </div>
+    <div class="card-body">
+      <div class="connect-row">
+        <input id="mgmt-key" type="password" autocomplete="current-password" data-i18n-placeholder="connect.placeholder" placeholder="Management key">
+        <button id="connect-button" class="btn btn-primary" type="button">
+          <span class="btn-label" data-i18n="connect.button">Connect</span>
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <section class="card hidden" id="rules-card">
+    <div class="card-header">
+      <h2 data-i18n="rules.title">API key rules</h2>
+      <span class="hint" data-i18n="rules.hint">A key without patterns is unrestricted. Patterns support * wildcards, e.g. gpt-5*.</span>
+    </div>
+    <div class="card-body" style="padding: 0 18px;">
+      <table class="key-table">
+        <thead>
+          <tr>
+            <th style="width: 44%;" data-i18n="rules.colKey">API key</th>
+            <th style="width: 12%;" data-i18n="rules.colStatus">Status</th>
+            <th data-i18n="rules.colModels">Allowed models</th>
+          </tr>
+        </thead>
+        <tbody id="rules-body"></tbody>
+      </table>
+      <div class="empty hidden" id="rules-empty" data-i18n="rules.empty">No API keys configured on the host.</div>
+      <div class="toolbar" style="padding-bottom: 14px;">
+        <span class="hint" id="dirty-hint"></span>
+        <span class="spacer"></span>
+        <button id="refresh-button" class="btn btn-secondary" type="button">
+          <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="1 4 1 10 7 10"/>
+            <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
+          </svg>
+          <span class="btn-label" data-i18n="rules.refresh">Reload</span>
+        </button>
+        <button id="save-button" class="btn btn-primary" type="button" disabled>
+          <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+            <polyline points="17 21 17 13 7 13 7 21"/>
+            <polyline points="7 3 7 8 15 8"/>
+          </svg>
+          <span class="btn-label" data-i18n="rules.save">Save changes</span>
+        </button>
+      </div>
+    </div>
+    <pre class="log" id="log" data-state="idle" data-i18n="log.idle">Connect with the management key to load rules.</pre>
+  </section>
+
+  <footer>
+    <span data-i18n="footer.text">Managed by the model-limiter plugin</span> ·
+    <a href="https://github.com/berry-shake/cpa-model-limiter-plugin" target="_blank" rel="noopener" data-i18n="footer.source">source</a>
+  </footer>
+</main>
+<script>
+(() => {
+  const LANG_KEY = 'cliproxy-model-limiter-lang';
+  const MGMT_KEY = 'cliproxy-model-limiter-mgmt-key';
+  const messages = {
+    en: {
+      title: 'Model Limiter · CLI Proxy API',
+      'hero.title': 'Model Limiter',
+      'hero.subtitle': 'Restrict which models each API key may use.',
+      'health.disconnected': 'Not connected',
+      'health.ok': '{count} keys · {rules} restricted',
+      'health.dirty': 'Unsaved changes',
+      'health.error': 'Error',
+      'connect.title': 'Management key',
+      'connect.hint': 'Rules are stored in the host config; editing requires the management key.',
+      'connect.placeholder': 'Management key',
+      'connect.button': 'Connect',
+      'connect.working': 'Connecting…',
+      'rules.title': 'API key rules',
+      'rules.hint': 'A key without patterns is unrestricted. Patterns support * wildcards, e.g. gpt-5*.',
+      'rules.colKey': 'API key',
+      'rules.colStatus': 'Status',
+      'rules.colModels': 'Allowed models',
+      'rules.empty': 'No API keys configured on the host.',
+      'rules.refresh': 'Reload',
+      'rules.save': 'Save changes',
+      'rules.saving': 'Saving…',
+      'rules.unrestricted': 'All models',
+      'rules.restricted': 'Restricted',
+      'rules.orphan': 'not in api-keys',
+      'rules.addPattern': 'add pattern…',
+      'rules.removeRule': 'Remove this rule',
+      'dirty.count': '{count} unsaved change(s)',
+      'log.idle': 'Connect with the management key to load rules.',
+      'log.loading': 'Loading api-keys and rules…',
+      'log.loaded': 'Loaded {keys} api-keys, {rules} restriction rule(s).',
+      'log.loadFailed': 'Load failed: {msg}',
+      'log.saving': 'Saving rules…',
+      'log.saved': 'Rules saved. The host reloads the plugin configuration automatically.',
+      'log.saveFailed': 'Save failed: {msg}',
+      'log.badKey': 'Connection failed: {msg}',
+      'log.orphanWarning': 'Warning: {count} rule(s) reference keys missing from api-keys; they never grant access.',
+      'footer.text': 'Managed by the model-limiter plugin',
+      'footer.source': 'source',
+    },
+    zh: {
+      title: '模型限制器 · CLI Proxy API',
+      'hero.title': '模型限制器',
+      'hero.subtitle': '为每个 API key 限制可用的模型。',
+      'health.disconnected': '未连接',
+      'health.ok': '{count} 个 key · {rules} 个受限',
+      'health.dirty': '有未保存的修改',
+      'health.error': '出错了',
+      'connect.title': '管理密钥',
+      'connect.hint': '规则保存在宿主配置中，编辑需要管理密钥。',
+      'connect.placeholder': '管理密钥',
+      'connect.button': '连接',
+      'connect.working': '连接中…',
+      'rules.title': 'API key 规则',
+      'rules.hint': '没有模式的 key 不受限制。模式支持 * 通配符，如 gpt-5*。',
+      'rules.colKey': 'API key',
+      'rules.colStatus': '状态',
+      'rules.colModels': '允许的模型',
+      'rules.empty': '宿主尚未配置任何 API key。',
+      'rules.refresh': '重新加载',
+      'rules.save': '保存修改',
+      'rules.saving': '保存中…',
+      'rules.unrestricted': '全部模型',
+      'rules.restricted': '受限',
+      'rules.orphan': '不在 api-keys 中',
+      'rules.addPattern': '添加模式…',
+      'rules.removeRule': '删除该规则',
+      'dirty.count': '{count} 处未保存的修改',
+      'log.idle': '输入管理密钥连接后即可加载规则。',
+      'log.loading': '正在加载 api-keys 与规则…',
+      'log.loaded': '已加载 {keys} 个 api-key、{rules} 条限制规则。',
+      'log.loadFailed': '加载失败：{msg}',
+      'log.saving': '正在保存规则…',
+      'log.saved': '规则已保存，宿主会自动热重载插件配置。',
+      'log.saveFailed': '保存失败：{msg}',
+      'log.badKey': '连接失败:{msg}',
+      'log.orphanWarning': '警告:有 {count} 条规则对应的 key 不在 api-keys 中，这些规则不会赋予任何访问权限。',
+      'footer.text': '由 model-limiter 插件驱动',
+      'footer.source': '源代码',
+    },
+  };
+
+  function detectDefaultLang() {
+    const list = navigator.languages && navigator.languages.length ? navigator.languages : [navigator.language || 'en'];
+    for (const raw of list) {
+      const tag = (raw || '').toLowerCase();
+      if (tag.startsWith('zh')) return 'zh';
+      if (tag.startsWith('en')) return 'en';
+    }
+    return 'en';
+  }
+
+  function initialLang() {
+    try {
+      const stored = localStorage.getItem(LANG_KEY);
+      if (stored && messages[stored]) return stored;
+    } catch (_) { /* ignore */ }
+    return detectDefaultLang();
+  }
+
+  let currentLang = initialLang();
+
+  function t(key, params) {
+    const bundle = messages[currentLang] || messages.en;
+    let template = bundle[key];
+    if (template === undefined) template = messages.en[key];
+    if (template === undefined) return key;
+    if (params) {
+      return template.replace(/\{(\w+)\}/g, (m, name) => (params[name] !== undefined ? String(params[name]) : m));
+    }
+    return template;
+  }
+
+  function applyPanelTheme() {
+    let theme = 'auto';
+    try {
+      const stored = JSON.parse(localStorage.getItem('cli-proxy-theme') || 'null');
+      if (stored && stored.state && typeof stored.state.theme === 'string') theme = stored.state.theme;
+    } catch (_) { /* keep auto */ }
+    if (theme === 'auto') {
+      const dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+      theme = dark ? 'dark' : 'white';
+    }
+    if (theme === 'dark' || theme === 'white') {
+      document.documentElement.setAttribute('data-theme', theme);
+    } else {
+      document.documentElement.removeAttribute('data-theme');
+    }
+  }
+  applyPanelTheme();
+  if (window.matchMedia) {
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyPanelTheme);
+  }
+
+  const connectCard = document.getElementById('connect-card');
+  const rulesCard = document.getElementById('rules-card');
+  const mgmtKeyInput = document.getElementById('mgmt-key');
+  const connectButton = document.getElementById('connect-button');
+  const refreshButton = document.getElementById('refresh-button');
+  const saveButton = document.getElementById('save-button');
+  const rulesBody = document.getElementById('rules-body');
+  const rulesEmpty = document.getElementById('rules-empty');
+  const dirtyHint = document.getElementById('dirty-hint');
+  const health = document.getElementById('health');
+  const healthLabel = document.getElementById('health-label');
+  const log = document.getElementById('log');
+
+  // state.rows: [{key, patterns: [..], orphan}] — patterns empty = unrestricted.
+  const state = {
+    mgmtKey: '',
+    rows: [],
+    savedSnapshot: '',
+    logState: { state: 'idle', key: 'log.idle', params: null },
+    healthState: { state: 'unknown', key: 'health.disconnected', params: null },
+  };
+
+  function setLog(logState, key, params) {
+    state.logState = { state: logState, key, params: params || null };
+    log.dataset.state = logState;
+    log.textContent = t(key, params);
+  }
+
+  function setHealth(healthState, key, params) {
+    state.healthState = { state: healthState, key, params: params || null };
+    health.dataset.state = healthState;
+    healthLabel.textContent = t(key, params);
+  }
+
+  function snapshot() {
+    return JSON.stringify(state.rows.map((row) => ({ k: row.key, p: row.patterns })));
+  }
+
+  function isDirty() { return snapshot() !== state.savedSnapshot; }
+
+  function refreshDirtyUI() {
+    const dirty = isDirty();
+    saveButton.disabled = !dirty;
+    if (dirty) {
+      const changed = countChanges();
+      dirtyHint.textContent = t('dirty.count', { count: changed });
+      setHealth('dirty', 'health.dirty');
+    } else {
+      dirtyHint.textContent = '';
+      applyOkHealth();
+    }
+  }
+
+  function countChanges() {
+    let saved = [];
+    try { saved = JSON.parse(state.savedSnapshot || '[]'); } catch (_) { saved = []; }
+    const savedMap = new Map(saved.map((item) => [item.k, JSON.stringify(item.p)]));
+    let count = 0;
+    const seen = new Set();
+    for (const row of state.rows) {
+      seen.add(row.key);
+      const before = savedMap.get(row.key);
+      const after = JSON.stringify(row.patterns);
+      if (before === undefined) { if (row.patterns.length) count++; continue; }
+      if (before !== after) count++;
+    }
+    for (const [key] of savedMap) if (!seen.has(key)) count++;
+    return count || 1;
+  }
+
+  function applyOkHealth() {
+    const restricted = state.rows.filter((row) => row.patterns.length).length;
+    const hostKeys = state.rows.filter((row) => !row.orphan).length;
+    setHealth('ok', 'health.ok', { count: hostKeys, rules: restricted });
+  }
+
+  async function api(path, options) {
+    const opts = options || {};
+    const headers = Object.assign({}, opts.headers || {});
+    if (state.mgmtKey) headers['Authorization'] = 'Bearer ' + state.mgmtKey;
+    if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
+    const response = await fetch(path, {
+      method: opts.method || 'GET',
+      cache: 'no-store',
+      headers,
+      body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+    });
+    const text = await response.text();
+    let data;
+    try { data = JSON.parse(text); } catch (_) { data = { message: text || ('HTTP ' + response.status) }; }
+    if (!response.ok) throw new Error(data.message || data.error || ('HTTP ' + response.status));
+    return data;
+  }
+
+  function rulesFromConfig(config) {
+    const map = new Map();
+    const list = config && Array.isArray(config.keys) ? config.keys : [];
+    for (const entry of list) {
+      if (!entry || typeof entry !== 'object') continue;
+      const key = String(entry['api-key'] || '').trim();
+      if (!key || map.has(key)) continue;
+      const models = Array.isArray(entry.models) ? entry.models.map((m) => String(m).trim()).filter(Boolean) : [];
+      map.set(key, models);
+    }
+    return map;
+  }
+
+  async function loadAll() {
+    setLog('working', 'log.loading');
+    const [keysResp, configResp] = await Promise.all([
+      api('/v0/management/api-keys'),
+      api('/v0/management/plugins/model-limiter/config'),
+    ]);
+    const hostKeys = Array.isArray(keysResp['api-keys']) ? keysResp['api-keys'] : [];
+    const rules = rulesFromConfig(configResp);
+    const rows = hostKeys.map((key) => ({ key, patterns: rules.get(key) || [], orphan: false }));
+    for (const [key, patterns] of rules) {
+      if (!hostKeys.includes(key)) rows.push({ key, patterns, orphan: true });
+    }
+    state.rows = rows;
+    state.savedSnapshot = snapshot();
+    renderRows();
+    const restricted = rows.filter((row) => row.patterns.length).length;
+    setLog('ok', 'log.loaded', { keys: hostKeys.length, rules: restricted });
+    const orphans = rows.filter((row) => row.orphan).length;
+    if (orphans) setLog('error', 'log.orphanWarning', { count: orphans });
+    applyOkHealth();
+    refreshDirtyUI();
+  }
+
+  function renderRows() {
+    rulesBody.textContent = '';
+    rulesEmpty.classList.toggle('hidden', state.rows.length > 0);
+    state.rows.forEach((row, index) => {
+      const tr = document.createElement('tr');
+
+      const keyTd = document.createElement('td');
+      keyTd.className = 'key-cell';
+      keyTd.textContent = row.key;
+      if (row.orphan) {
+        const tag = document.createElement('span');
+        tag.className = 'orphan-tag';
+        tag.textContent = t('rules.orphan');
+        keyTd.appendChild(tag);
+      }
+      tr.appendChild(keyTd);
+
+      const statusTd = document.createElement('td');
+      const badge = document.createElement('span');
+      const restricted = row.patterns.length > 0;
+      badge.className = 'badge ' + (restricted ? 'restricted' : 'unrestricted');
+      badge.textContent = t(restricted ? 'rules.restricted' : 'rules.unrestricted');
+      statusTd.appendChild(badge);
+      tr.appendChild(statusTd);
+
+      const modelsTd = document.createElement('td');
+      const chips = document.createElement('div');
+      chips.className = 'chips';
+      row.patterns.forEach((pattern, patternIndex) => {
+        const chip = document.createElement('span');
+        chip.className = 'chip';
+        const label = document.createElement('span');
+        label.textContent = pattern;
+        chip.appendChild(label);
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.textContent = '×';
+        remove.setAttribute('aria-label', 'remove ' + pattern);
+        remove.addEventListener('click', () => {
+          row.patterns.splice(patternIndex, 1);
+          renderRows();
+          refreshDirtyUI();
+        });
+        chip.appendChild(remove);
+        chips.appendChild(chip);
+      });
+      const input = document.createElement('input');
+      input.className = 'chip-input';
+      input.type = 'text';
+      input.placeholder = t('rules.addPattern');
+      input.dataset.rowIndex = String(index);
+      input.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' && event.key !== ',') return;
+        event.preventDefault();
+        commitPattern(row, input);
+      });
+      input.addEventListener('blur', () => commitPattern(row, input));
+      chips.appendChild(input);
+      if (row.patterns.length) {
+        const clear = document.createElement('button');
+        clear.type = 'button';
+        clear.className = 'icon-btn';
+        clear.title = t('rules.removeRule');
+        clear.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
+        clear.addEventListener('click', () => {
+          row.patterns = [];
+          renderRows();
+          refreshDirtyUI();
+        });
+        chips.appendChild(clear);
+      }
+      modelsTd.appendChild(chips);
+      tr.appendChild(modelsTd);
+      rulesBody.appendChild(tr);
+    });
+  }
+
+  function commitPattern(row, input) {
+    const value = input.value.trim().toLowerCase().replace(/,+$/, '');
+    if (!value) { input.value = ''; return; }
+    if (!row.patterns.includes(value)) row.patterns.push(value);
+    input.value = '';
+    const focusIndex = input.dataset.rowIndex;
+    renderRows();
+    refreshDirtyUI();
+    const next = rulesBody.querySelector('input.chip-input[data-row-index="' + focusIndex + '"]');
+    if (next) next.focus();
+  }
+
+  function setBusy(button, busy, workingKey) {
+    button.disabled = busy;
+    const label = button.querySelector('.btn-label');
+    if (!label) return;
+    if (busy) {
+      if (!label.dataset.originalI18n) label.dataset.originalI18n = label.dataset.i18n || '';
+      label.textContent = t(workingKey);
+    } else if (label.dataset.originalI18n) {
+      label.dataset.i18n = label.dataset.originalI18n;
+      label.textContent = t(label.dataset.originalI18n);
+      delete label.dataset.originalI18n;
+    }
+  }
+
+  async function connect() {
+    const value = mgmtKeyInput.value.trim();
+    if (!value) { mgmtKeyInput.focus(); return; }
+    state.mgmtKey = value;
+    setBusy(connectButton, true, 'connect.working');
+    try {
+      await loadAll();
+      try { sessionStorage.setItem(MGMT_KEY, value); } catch (_) { /* ignore */ }
+      connectCard.classList.add('hidden');
+      rulesCard.classList.remove('hidden');
+    } catch (error) {
+      state.mgmtKey = '';
+      setHealth('error', 'health.error');
+      setLog('error', 'log.badKey', { msg: error.message });
+      rulesCard.classList.remove('hidden');
+    } finally {
+      setBusy(connectButton, false, 'connect.working');
+    }
+  }
+
+  async function save() {
+    const keys = state.rows
+      .filter((row) => row.patterns.length > 0)
+      .map((row) => ({ 'api-key': row.key, models: row.patterns.slice() }));
+    setBusy(saveButton, true, 'rules.saving');
+    setLog('working', 'log.saving');
+    try {
+      await api('/v0/management/plugins/model-limiter/config', {
+        method: 'PATCH',
+        body: { keys: keys.length ? keys : null },
+      });
+      state.savedSnapshot = snapshot();
+      setLog('ok', 'log.saved');
+      refreshDirtyUI();
+    } catch (error) {
+      setLog('error', 'log.saveFailed', { msg: error.message });
+      setHealth('error', 'health.error');
+      saveButton.disabled = false;
+    } finally {
+      setBusy(saveButton, false, 'rules.saving');
+      if (!isDirty()) saveButton.disabled = true;
+    }
+  }
+
+  async function reload() {
+    setBusy(refreshButton, true, 'connect.working');
+    try {
+      await loadAll();
+    } catch (error) {
+      setHealth('error', 'health.error');
+      setLog('error', 'log.loadFailed', { msg: error.message });
+    } finally {
+      setBusy(refreshButton, false, 'connect.working');
+    }
+  }
+
+  function applyStaticI18n() {
+    document.documentElement.lang = currentLang === 'zh' ? 'zh-CN' : 'en';
+    document.title = t('title');
+    document.querySelectorAll('[data-i18n]').forEach((el) => {
+      if (el === healthLabel || el === log) return;
+      el.textContent = t(el.dataset.i18n);
+    });
+    document.querySelectorAll('[data-i18n-placeholder]').forEach((el) => {
+      el.setAttribute('placeholder', t(el.dataset.i18nPlaceholder));
+    });
+    healthLabel.textContent = t(state.healthState.key, state.healthState.params);
+    log.textContent = t(state.logState.key, state.logState.params);
+    if (isDirty()) dirtyHint.textContent = t('dirty.count', { count: countChanges() });
+    document.querySelectorAll('.lang-switch button').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.lang === currentLang);
+      btn.setAttribute('aria-pressed', btn.dataset.lang === currentLang ? 'true' : 'false');
+    });
+    renderRows();
+  }
+
+  function setLang(lang, persist) {
+    if (!messages[lang] || lang === currentLang) { applyStaticI18n(); return; }
+    currentLang = lang;
+    if (persist) {
+      try { localStorage.setItem(LANG_KEY, lang); } catch (_) { /* ignore */ }
+    }
+    applyStaticI18n();
+  }
+
+  document.querySelectorAll('.lang-switch button').forEach((btn) => {
+    btn.addEventListener('click', () => setLang(btn.dataset.lang, true));
+  });
+
+  connectButton.addEventListener('click', connect);
+  mgmtKeyInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') connect();
+  });
+  refreshButton.addEventListener('click', reload);
+  saveButton.addEventListener('click', save);
+
+  applyStaticI18n();
+
+  // Auto-connect when a key was stored in this browser session.
+  try {
+    const stored = sessionStorage.getItem(MGMT_KEY);
+    if (stored) {
+      mgmtKeyInput.value = stored;
+      connect();
+    }
+  } catch (_) { /* ignore */ }
+})();
+</script>
+</body>
+</html>

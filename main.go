@@ -84,7 +84,7 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, api *C.cliproxy_plugin_api)
 	}
 	C.store_host_api(host)
 	serviceMu.Lock()
-	service = pluginruntime.New(pluginVersion, hostLog)
+	service = pluginruntime.New(pluginVersion, hostLog, nil)
 	serviceMu.Unlock()
 	api.abi_version = C.uint32_t(pluginabi.ABIVersion)
 	api.call = C.cliproxy_plugin_call_fn(C.cliproxyPluginCall)

@@ -2,12 +2,24 @@ package plugin
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
+
+func fakeHostKeys(keys ...string) HostKeysResolver {
+	set := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		set[key] = struct{}{}
+	}
+	return func() (map[string]struct{}, error) {
+		return set, nil
+	}
+}
 
 func registerPayload(t *testing.T, configYAML string) []byte {
 	t.Helper()
@@ -34,29 +46,27 @@ func decodeEnvelope(t *testing.T, raw []byte, out any) {
 	}
 }
 
-func TestRegisterReportsExclusiveCapability(t *testing.T) {
+func TestRegisterReportsExclusiveCapabilities(t *testing.T) {
 	t.Parallel()
 
-	service := New("1.0.0", nil)
+	service := New("1.0.0", nil, fakeHostKeys())
 	var registration rpcRegistration
-	decodeEnvelope(t, service.Call(pluginabi.MethodPluginRegister, registerPayload(t, "enabled: true\n")), &registration)
+	decodeEnvelope(t, service.Call(pluginabi.MethodPluginRegister, registerPayload(t, "keys: []\n")), &registration)
 	if !registration.Capabilities.FrontendAuthProvider {
 		t.Fatal("frontend auth capability missing")
 	}
-	if registration.Capabilities.FrontendAuthProviderExclusive {
-		t.Fatal("exclusive should default to false")
-	}
-
-	decodeEnvelope(t, service.Call(pluginabi.MethodPluginReconfigure, registerPayload(t, "enabled: true\nexclusive: true\n")), &registration)
 	if !registration.Capabilities.FrontendAuthProviderExclusive {
-		t.Fatal("exclusive should follow config")
+		t.Fatal("exclusive capability must always be reported")
+	}
+	if !registration.Capabilities.ManagementAPI {
+		t.Fatal("management api capability missing")
 	}
 }
 
 func TestFrontendAuthIdentifier(t *testing.T) {
 	t.Parallel()
 
-	service := New("1.0.0", nil)
+	service := New("1.0.0", nil, fakeHostKeys())
 	var identifier rpcIdentifierResponse
 	decodeEnvelope(t, service.Call(pluginabi.MethodFrontendAuthIdentifier, nil), &identifier)
 	if identifier.Identifier != ProviderID {
@@ -64,17 +74,19 @@ func TestFrontendAuthIdentifier(t *testing.T) {
 	}
 }
 
-func TestAuthenticateEnforcesModelAllowList(t *testing.T) {
+func TestAuthenticateRequiresHostKeyAndAllowedModel(t *testing.T) {
 	t.Parallel()
 
-	service := New("1.0.0", nil)
+	service := New("1.0.0", nil, fakeHostKeys("sk-alpha", "sk-open"))
 	service.Call(pluginabi.MethodPluginRegister, registerPayload(t, `
-enabled: true
 keys:
   - api-key: sk-alpha
     models:
       - gpt-5.2
       - claude-*
+  - api-key: sk-ghost
+    models:
+      - gpt-5.2
 `))
 
 	tests := []struct {
@@ -110,9 +122,18 @@ keys:
 			want: false,
 		},
 		{
-			// Unlisted keys are not handled: the host access manager falls
-			// through to the builtin api-keys provider.
-			name: "unknown key falls through",
+			// A key that only exists in the plugin rules but not in the host
+			// api-keys list must be rejected: rules never grant access.
+			name: "rule-only key rejected",
+			req: pluginapi.FrontendAuthRequest{
+				Path:    "/v1/chat/completions",
+				Headers: http.Header{"Authorization": {"Bearer sk-ghost"}},
+				Body:    []byte(`{"model":"gpt-5.2"}`),
+			},
+			want: false,
+		},
+		{
+			name: "unknown key rejected",
 			req: pluginapi.FrontendAuthRequest{
 				Path:    "/v1/chat/completions",
 				Headers: http.Header{"Authorization": {"Bearer sk-unknown"}},
@@ -128,6 +149,16 @@ keys:
 				Body:    []byte(`{"model":"gpt-5.2"}`),
 			},
 			want: false,
+		},
+		{
+			// A host key without a plugin rule is unrestricted.
+			name: "host key without rule passes",
+			req: pluginapi.FrontendAuthRequest{
+				Path:    "/v1/chat/completions",
+				Headers: http.Header{"Authorization": {"Bearer sk-open"}},
+				Body:    []byte(`{"model":"gemini-2.5-pro"}`),
+			},
+			want: true,
 		},
 		{
 			name: "model-less endpoint passes key check",
@@ -160,12 +191,28 @@ keys:
 	}
 }
 
+func TestAuthenticateFailsClosedWhenHostKeysUnavailable(t *testing.T) {
+	t.Parallel()
+
+	failing := func() (map[string]struct{}, error) {
+		return nil, errors.New("boom")
+	}
+	service := New("1.0.0", nil, failing)
+	resp := service.Authenticate(pluginapi.FrontendAuthRequest{
+		Path:    "/v1/chat/completions",
+		Headers: http.Header{"Authorization": {"Bearer sk-alpha"}},
+		Body:    []byte(`{"model":"gpt-5.2"}`),
+	})
+	if resp.Authenticated {
+		t.Fatal("must reject when the host api-keys list cannot be read")
+	}
+}
+
 func TestAuthenticateViaRPCMethod(t *testing.T) {
 	t.Parallel()
 
-	service := New("1.0.0", nil)
+	service := New("1.0.0", nil, fakeHostKeys("sk-alpha"))
 	service.Call(pluginabi.MethodPluginRegister, registerPayload(t, `
-enabled: true
 keys:
   - api-key: sk-alpha
     models: [gpt-5.2]
@@ -189,19 +236,73 @@ keys:
 func TestBrokenConfigResetsToEmptyRules(t *testing.T) {
 	t.Parallel()
 
-	service := New("1.0.0", nil)
-	service.Call(pluginabi.MethodPluginRegister, registerPayload(t, "keys:\n  - api-key: sk-alpha\n"))
-	// A rejected reconfigure (duplicate keys) must reset to empty rules
-	// rather than keeping stale rules silently: sk-alpha falls back to the
-	// host api-keys provider, where a restricted key is not listed.
+	service := New("1.0.0", nil, fakeHostKeys("sk-alpha"))
+	service.Call(pluginabi.MethodPluginRegister, registerPayload(t, `
+keys:
+  - api-key: sk-alpha
+    models: [gpt-5.2]
+`))
+	// A rejected reconfigure (duplicate keys) resets to empty rules: keys in
+	// the host api-keys list become unrestricted rather than being locked out
+	// by stale rules.
 	service.Call(pluginabi.MethodPluginReconfigure, registerPayload(t, "keys: [{api-key: a}, {api-key: a}]\n"))
 
 	resp := service.Authenticate(pluginapi.FrontendAuthRequest{
 		Path:    "/v1/chat/completions",
 		Headers: http.Header{"Authorization": {"Bearer sk-alpha"}},
-		Body:    []byte(`{"model":"gpt-5.2"}`),
+		Body:    []byte(`{"model":"gemini-2.5-pro"}`),
 	})
-	if resp.Authenticated {
-		t.Fatal("stale rules should not survive a failed reconfigure")
+	if !resp.Authenticated {
+		t.Fatal("host key should be unrestricted after rules reset")
+	}
+}
+
+func TestManagementRegisterExposesPanelResource(t *testing.T) {
+	t.Parallel()
+
+	service := New("1.0.0", nil, fakeHostKeys())
+	var registration managementRegistration
+	decodeEnvelope(t, service.Call(pluginabi.MethodManagementRegister, nil), &registration)
+	if len(registration.Resources) != 1 {
+		t.Fatalf("resources = %+v", registration.Resources)
+	}
+	if registration.Resources[0].Path != "/panel" || registration.Resources[0].Menu == "" {
+		t.Fatalf("panel resource = %+v", registration.Resources[0])
+	}
+}
+
+func TestManagementHandleServesPanelPage(t *testing.T) {
+	t.Parallel()
+
+	service := New("1.0.0", nil, fakeHostKeys())
+	raw, errMarshal := json.Marshal(managementRPCRequest{Method: http.MethodGet, Path: panelPath})
+	if errMarshal != nil {
+		t.Fatal(errMarshal)
+	}
+	var resp pluginapi.ManagementResponse
+	decodeEnvelope(t, service.Call(pluginabi.MethodManagementHandle, raw), &resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if got := resp.Headers.Get("Content-Type"); !strings.HasPrefix(got, "text/html") {
+		t.Fatalf("content type = %q", got)
+	}
+	if !strings.Contains(string(resp.Body), "Model Limiter") {
+		t.Fatal("panel body should mention Model Limiter")
+	}
+}
+
+func TestManagementHandleRejectsNonGetAndUnknownPath(t *testing.T) {
+	t.Parallel()
+
+	service := New("1.0.0", nil, fakeHostKeys())
+
+	post := service.handleManagement(managementRPCRequest{Method: http.MethodPost, Path: panelPath})
+	if post.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("post status = %d", post.StatusCode)
+	}
+	missing := service.handleManagement(managementRPCRequest{Method: http.MethodGet, Path: "/v0/resource/plugins/model-limiter/nope"})
+	if missing.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing status = %d", missing.StatusCode)
 	}
 }

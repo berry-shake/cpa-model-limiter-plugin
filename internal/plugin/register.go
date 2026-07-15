@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"encoding/json"
+	"net/http"
 	"strings"
 	"sync"
 
@@ -12,13 +13,16 @@ import (
 // ProviderID is the frontend auth provider identifier reported to the host.
 const ProviderID = "model-limiter"
 
+const panelPath = "/v0/resource/plugins/model-limiter/panel"
+
 // LogFunc forwards a log line to the host logger.
 type LogFunc func(level, message string, fields map[string]any)
 
 // Service dispatches plugin lifecycle and frontend auth RPC methods.
 type Service struct {
-	version string
-	logFn   LogFunc
+	version  string
+	logFn    LogFunc
+	hostKeys HostKeysResolver
 
 	mu  sync.RWMutex
 	cfg Config
@@ -27,6 +31,7 @@ type Service struct {
 type rpcCapabilities struct {
 	FrontendAuthProvider          bool `json:"frontend_auth_provider"`
 	FrontendAuthProviderExclusive bool `json:"frontend_auth_provider_exclusive"`
+	ManagementAPI                 bool `json:"management_api"`
 }
 
 type rpcRegistration struct {
@@ -43,16 +48,38 @@ type rpcLifecycleRequest struct {
 	ConfigYAML []byte `json:"config_yaml"`
 }
 
-// New builds a Service with an empty (deny-all) rule set until the host
-// delivers configuration at plugin.register time.
-func New(version string, logFn LogFunc) *Service {
+type resourceDeclaration struct {
+	Path        string `json:"path"`
+	Menu        string `json:"menu,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
+type managementRegistration struct {
+	Resources []resourceDeclaration `json:"resources,omitempty"`
+}
+
+type managementRPCRequest struct {
+	Method  string
+	Path    string
+	Headers http.Header
+	Query   map[string][]string
+	Body    []byte
+}
+
+// New builds a Service. Until the host delivers configuration at
+// plugin.register time the rule set is empty, which means "no model
+// restrictions" — the api-keys membership gate still applies.
+func New(version string, logFn LogFunc, hostKeys HostKeysResolver) *Service {
 	if strings.TrimSpace(version) == "" {
 		version = "0.0.0-dev"
 	}
 	if logFn == nil {
 		logFn = func(string, string, map[string]any) {}
 	}
-	return &Service{version: version, logFn: logFn, cfg: DefaultConfig()}
+	if hostKeys == nil {
+		hostKeys = NewHostKeysResolver()
+	}
+	return &Service{version: version, logFn: logFn, hostKeys: hostKeys, cfg: DefaultConfig()}
 }
 
 // Call handles one plugin RPC method and always returns a JSON envelope.
@@ -69,20 +96,16 @@ func (s *Service) Call(method string, request []byte) []byte {
 				GitHubRepository: "https://github.com/berry-shake/cpa-model-limiter-plugin",
 				ConfigFields: []pluginapi.ConfigField{
 					{
-						Name:        "exclusive",
-						Type:        pluginapi.ConfigFieldTypeBoolean,
-						Description: "Register as the only active frontend auth provider (default false). Leave false so unlisted keys keep flowing through the host api-keys; restricted keys must then NOT be duplicated into api-keys or the fallback would re-admit them.",
-					},
-					{
 						Name:        "keys",
 						Type:        pluginapi.ConfigFieldTypeArray,
-						Description: "Restricted key rules. Each entry: api-key (string) plus models (string list, * wildcards allowed). An empty or missing models list allows every model for that key. Keys not listed here are handled by the host api-keys provider.",
+						Description: "Restriction rules. Each entry: api-key (string) plus models (string list, * wildcards allowed). The key must also exist in the host api-keys list; a rule alone never grants access. Keys without a rule are unrestricted. Prefer the Model Limiter menu page for editing.",
 					},
 				},
 			},
 			Capabilities: rpcCapabilities{
 				FrontendAuthProvider:          true,
-				FrontendAuthProviderExclusive: s.snapshot().Exclusive,
+				FrontendAuthProviderExclusive: true,
+				ManagementAPI:                 true,
 			},
 		})
 	case pluginabi.MethodPluginShutdown:
@@ -95,16 +118,26 @@ func (s *Service) Call(method string, request []byte) []byte {
 			return ErrorEnvelope("invalid_request", "decode frontend auth request: "+errUnmarshal.Error())
 		}
 		return okEnvelope(s.Authenticate(req))
+	case pluginabi.MethodManagementRegister:
+		return okEnvelope(managementRegistration{
+			Resources: []resourceDeclaration{
+				{Path: "/panel", Menu: "Model Limiter", Description: "Edit per-key model restrictions."},
+			},
+		})
+	case pluginabi.MethodManagementHandle:
+		var req managementRPCRequest
+		if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+			return ErrorEnvelope("invalid_request", "decode management request: "+errUnmarshal.Error())
+		}
+		return okEnvelope(s.handleManagement(req))
 	default:
 		return ErrorEnvelope("unknown_method", "unknown method: "+method)
 	}
 }
 
 // applyConfig parses plugins.configs.model-limiter from the host RPC
-// payload. A missing or malformed payload resets to the empty default: with
-// no rules every request falls through to the host api-keys provider, so
-// restricted keys (absent from api-keys) stay rejected rather than silently
-// regaining access under stale rules.
+// payload. A missing or malformed payload resets to the empty default: no
+// model restrictions, while the api-keys membership gate keeps applying.
 func (s *Service) applyConfig(request []byte) {
 	cfg := DefaultConfig()
 	if len(request) > 0 {
@@ -121,10 +154,7 @@ func (s *Service) applyConfig(request []byte) {
 	s.mu.Lock()
 	s.cfg = cfg
 	s.mu.Unlock()
-	s.logFn("info", "model-limiter: configuration applied", map[string]any{
-		"keys":      len(cfg.Rules),
-		"exclusive": cfg.Exclusive,
-	})
+	s.logFn("info", "model-limiter: configuration applied", map[string]any{"rules": len(cfg.Rules)})
 }
 
 func (s *Service) snapshot() Config {
@@ -133,35 +163,39 @@ func (s *Service) snapshot() Config {
 	return s.cfg
 }
 
-// Authenticate decides whether the inbound request key may use the requested
-// model. Only keys listed in the plugin config are handled here; any other
-// key returns a non-authenticated response, which the host access manager
-// treats as "not handled" and passes to the next provider (the builtin
-// api-keys check). A restricted key with a denied model also falls through —
-// enforcement holds because restricted keys must not appear in api-keys.
+// Authenticate is the exclusive frontend auth decision. The host api-keys
+// list stays the single source of key validity:
+//
+//  1. key must be present in the host api-keys list, otherwise reject;
+//  2. a key without a rule is unrestricted;
+//  3. a key with a rule must request an allowed model.
+//
+// Rules only subtract capability from keys that api-keys already grants; a
+// rule for a key missing from api-keys never admits it.
 func (s *Service) Authenticate(req pluginapi.FrontendAuthRequest) pluginapi.FrontendAuthResponse {
-	cfg := s.snapshot()
-
 	key := ExtractAPIKey(req.Headers, req.Query)
 	if key == "" {
 		return pluginapi.FrontendAuthResponse{}
 	}
 
-	rule, ok := cfg.RuleForKey(key)
-	if !ok {
-		if cfg.Exclusive {
-			s.logFn("warn", "model-limiter: unknown api key rejected (exclusive mode)", map[string]any{"key": MaskKey(key)})
-		}
+	hostKeys, errKeys := s.hostKeys()
+	if errKeys != nil {
+		s.logFn("error", "model-limiter: cannot read host api-keys, rejecting request", map[string]any{"error": errKeys.Error()})
+		return pluginapi.FrontendAuthResponse{}
+	}
+	if _, known := hostKeys[key]; !known {
 		return pluginapi.FrontendAuthResponse{}
 	}
 
 	model := ExtractModel(req.Path, req.Body)
-	if model != "" && !rule.AllowsModel(model) {
-		s.logFn("warn", "model-limiter: model not allowed for key", map[string]any{
-			"key":   MaskKey(key),
-			"model": model,
-		})
-		return pluginapi.FrontendAuthResponse{}
+	if rule, restricted := s.snapshot().RuleForKey(key); restricted {
+		if model != "" && !rule.AllowsModel(model) {
+			s.logFn("warn", "model-limiter: model not allowed for key", map[string]any{
+				"key":   MaskKey(key),
+				"model": model,
+			})
+			return pluginapi.FrontendAuthResponse{}
+		}
 	}
 
 	return pluginapi.FrontendAuthResponse{

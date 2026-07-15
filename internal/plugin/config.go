@@ -9,14 +9,9 @@ import (
 
 // Config holds the parsed plugin configuration.
 type Config struct {
-	// Exclusive registers the plugin as the only active frontend auth
-	// provider. Defaults to false: the plugin governs only the keys listed
-	// here while every other key keeps flowing through the host api-keys
-	// provider. Enforcement stays hard as long as restricted keys are not
-	// duplicated into the host api-keys list — a rejection here falls
-	// through to the builtin provider, which denies unknown keys.
-	Exclusive bool
-	// Rules maps a normalized API key to its rule.
+	// Rules maps a normalized API key to its rule. Keys not listed here are
+	// unrestricted; every key (listed or not) must additionally be present
+	// in the host api-keys list to be accepted at all.
 	Rules map[string]Rule
 }
 
@@ -28,8 +23,7 @@ type Rule struct {
 }
 
 type yamlConfig struct {
-	Exclusive *bool     `yaml:"exclusive"`
-	Keys      []yamlKey `yaml:"keys"`
+	Keys []yamlKey `yaml:"keys"`
 }
 
 type yamlKey struct {
@@ -38,10 +32,10 @@ type yamlKey struct {
 }
 
 // DefaultConfig returns the empty default used before any host config
-// arrives: no restricted keys and non-exclusive registration, so the host
-// api-keys provider keeps governing all traffic.
+// arrives: no per-key restrictions, so every key present in the host
+// api-keys list passes with any model.
 func DefaultConfig() Config {
-	return Config{Exclusive: false, Rules: map[string]Rule{}}
+	return Config{Rules: map[string]Rule{}}
 }
 
 // ParseConfig parses the plugins.configs.model-limiter YAML subtree.
@@ -51,9 +45,6 @@ func ParseConfig(raw []byte) (Config, error) {
 		return Config{}, fmt.Errorf("parse plugin config: %w", errUnmarshal)
 	}
 	out := DefaultConfig()
-	if parsed.Exclusive != nil {
-		out.Exclusive = *parsed.Exclusive
-	}
 	for index, entry := range parsed.Keys {
 		key := strings.TrimSpace(entry.APIKey)
 		if key == "" {

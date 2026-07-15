@@ -2,15 +2,12 @@ package plugin
 
 import "testing"
 
-func TestParseConfigDefaultsToNonExclusiveEmptyRules(t *testing.T) {
+func TestParseConfigDefaultsToEmptyRules(t *testing.T) {
 	t.Parallel()
 
 	cfg, errParse := ParseConfig([]byte("enabled: true\npriority: 0\n"))
 	if errParse != nil {
 		t.Fatal(errParse)
-	}
-	if cfg.Exclusive {
-		t.Fatal("exclusive should default to false")
 	}
 	if len(cfg.Rules) != 0 {
 		t.Fatalf("rules = %d, want 0", len(cfg.Rules))
@@ -21,8 +18,6 @@ func TestParseConfigReadsKeysAndModels(t *testing.T) {
 	t.Parallel()
 
 	raw := []byte(`
-enabled: true
-exclusive: true
 keys:
   - api-key: sk-alpha
     models:
@@ -33,9 +28,6 @@ keys:
 	cfg, errParse := ParseConfig(raw)
 	if errParse != nil {
 		t.Fatal(errParse)
-	}
-	if !cfg.Exclusive {
-		t.Fatal("exclusive should be true")
 	}
 	rule, ok := cfg.RuleForKey("sk-alpha")
 	if !ok {
