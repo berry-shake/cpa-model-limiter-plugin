@@ -45,6 +45,9 @@ func (s *Service) handleManagement(req managementRPCRequest) pluginapi.Managemen
 	if req.Method != http.MethodGet {
 		return jsonResponse(http.StatusMethodNotAllowed, errorBody{Error: "method_not_allowed", Message: "only GET is accepted on resource routes"})
 	}
+	if req.Path == logoPath {
+		return logoResponse()
+	}
 	origins := s.AllowedOrigins()
 	switch req.Path {
 	case panelPath:

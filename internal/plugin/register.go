@@ -108,6 +108,7 @@ func (s *Service) Call(method string, request []byte) []byte {
 				Version:          s.version,
 				Author:           "berry-shake",
 				GitHubRepository: "https://github.com/berry-shake/cpa-model-limiter-plugin",
+				Logo:             logoPath,
 				ConfigFields: []pluginapi.ConfigField{
 					{
 						Name:        configKeys,
@@ -141,10 +142,12 @@ func (s *Service) Call(method string, request []byte) []byte {
 		return okEnvelope(managementRegistration{
 			Resources: []resourceDeclaration{
 				{Path: "/panel", Menu: "Model Limiter", Description: "Edit per-key model restrictions."},
-				// /state and /apply back the panel page. Menu is empty so they
-				// stay out of the management panel sidebar.
+				// /state and /apply back the panel page; /logo.png is loaded
+				// as the sidebar icon. Menu is empty so they stay out of the
+				// management panel sidebar.
 				{Path: "/state"},
 				{Path: "/apply"},
+				{Path: "/logo.png"},
 			},
 		})
 	case pluginabi.MethodManagementHandle:

@@ -273,7 +273,7 @@ func TestManagementRegisterExposesPanelResource(t *testing.T) {
 	if !okPanel || panel.Menu == "" {
 		t.Fatalf("panel resource must be a menu entry, got %+v", panel)
 	}
-	for _, sub := range []string{"/state", "/apply"} {
+	for _, sub := range []string{"/state", "/apply", "/logo.png"} {
 		res, ok := paths[sub]
 		if !ok {
 			t.Fatalf("missing resource %q, got %+v", sub, registration.Resources)
@@ -281,6 +281,33 @@ func TestManagementRegisterExposesPanelResource(t *testing.T) {
 		if res.Menu != "" {
 			t.Fatalf("%q must not surface as a menu entry, got %+v", sub, res)
 		}
+	}
+}
+
+func TestMetadataAdvertisesLogoResource(t *testing.T) {
+	t.Parallel()
+
+	service := New("1.0.0", nil, fakeHostKeys())
+	var registration rpcRegistration
+	decodeEnvelope(t, service.Call(pluginabi.MethodPluginRegister, nil), &registration)
+	if registration.Metadata.Logo != logoPath {
+		t.Fatalf("Metadata.Logo = %q, want %q", registration.Metadata.Logo, logoPath)
+	}
+}
+
+func TestLogoResourceServesEmbeddedPNG(t *testing.T) {
+	t.Parallel()
+
+	service := New("1.0.0", nil, fakeHostKeys())
+	resp := service.handleManagement(managementRPCRequest{Method: http.MethodGet, Path: logoPath})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if got := resp.Headers.Get("Content-Type"); got != "image/png" {
+		t.Fatalf("content-type = %q", got)
+	}
+	if len(resp.Body) < 8 || string(resp.Body[:8]) != "\x89PNG\r\n\x1a\n" {
+		t.Fatalf("body is not a PNG (len=%d)", len(resp.Body))
 	}
 }
 
