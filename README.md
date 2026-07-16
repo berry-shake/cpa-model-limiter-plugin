@@ -53,8 +53,8 @@ plugins:
         name: Model Limiter
         description: Restrict which models each inbound API key may use.
         author: berry-shake
-        version: 0.1.6
-        release-tag: v0.1.6
+        version: 0.1.7
+        release-tag: v0.1.7
         repository: https://github.com/berry-shake/cpa-model-limiter-plugin
         install:
           type: github-release
@@ -194,7 +194,7 @@ unrestricted keys):
 ```bash
 go test ./...
 go build -buildmode=c-shared \
-  -ldflags '-X main.pluginVersion=0.1.6-dev' \
+  -ldflags '-X main.pluginVersion=0.1.7-dev' \
   -o model-limiter.dylib .
 ```
 

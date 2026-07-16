@@ -183,3 +183,32 @@ func TestApplyRulesAtomicSurvivesTempCleanup(t *testing.T) {
 		}
 	}
 }
+
+func TestInPlaceWriteKeepsInodeAndContent(t *testing.T) {
+	t.Parallel()
+	path := newTempConfig(t, "old: content\n")
+	before, errBefore := os.Stat(path)
+	if errBefore != nil {
+		t.Fatal(errBefore)
+	}
+
+	payload := []byte("new: content\n")
+	if errWrite := inPlaceWrite(path, payload); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+
+	got, errRead := os.ReadFile(path)
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("content mismatch: %q", got)
+	}
+	after, errAfter := os.Stat(path)
+	if errAfter != nil {
+		t.Fatal(errAfter)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("in-place write must not replace the target inode")
+	}
+}

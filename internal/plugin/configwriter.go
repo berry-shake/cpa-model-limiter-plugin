@@ -253,8 +253,34 @@ func atomicWrite(target string, payload []byte) error {
 		}
 	}
 	if errRename := os.Rename(tmpPath, target); errRename != nil {
+		// Rename fails with EBUSY when target is a mount point (Docker
+		// single-file bind mount) and with EXDEV across filesystems. Fall
+		// back to an in-place overwrite, matching the host's own
+		// SaveConfigPreserveComments write path.
+		errInPlace := inPlaceWrite(target, payload)
 		cleanup()
-		return fmt.Errorf("rename temp config: %w", errRename)
+		if errInPlace != nil {
+			return fmt.Errorf("rename temp config: %w (in-place fallback: %v)", errRename, errInPlace)
+		}
+		return nil
 	}
 	return nil
+}
+
+// inPlaceWrite truncates and rewrites target without replacing its inode.
+// Not atomic, but required when target cannot be renamed over.
+func inPlaceWrite(target string, payload []byte) error {
+	f, errOpen := os.OpenFile(target, os.O_WRONLY|os.O_TRUNC, 0)
+	if errOpen != nil {
+		return errOpen
+	}
+	if _, errWrite := f.Write(payload); errWrite != nil {
+		_ = f.Close()
+		return errWrite
+	}
+	if errSync := f.Sync(); errSync != nil {
+		_ = f.Close()
+		return errSync
+	}
+	return f.Close()
 }
