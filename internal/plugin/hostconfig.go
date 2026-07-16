@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -26,18 +27,38 @@ type HostKeysResolver func() (HostKeysSnapshot, error)
 // re-parses only when the file changes. When a previously good snapshot
 // exists, transient read or parse failures fall back to it so a broken write
 // never locks every caller out.
+//
+// The stat itself costs several times more than the rest of the auth hot
+// path, so a freshness window bounds it: within checkEvery of the last
+// stat, resolve returns the cached snapshot lock-free via fresh. Config
+// edits therefore take at most checkEvery to be noticed. A zero checkEvery
+// disables the window and stats on every call.
 type hostKeysCache struct {
-	mu       sync.Mutex
-	path     string
-	modTime  time.Time
-	size     int64
-	snapshot HostKeysSnapshot
-	loaded   bool
+	fresh atomic.Pointer[freshSnapshot]
+
+	mu         sync.Mutex
+	path       string
+	checkEvery time.Duration
+	modTime    time.Time
+	size       int64
+	snapshot   HostKeysSnapshot
+	loaded     bool
 }
+
+// freshSnapshot pairs a snapshot with the deadline until which callers may
+// use it without re-checking the file.
+type freshSnapshot struct {
+	snapshot HostKeysSnapshot
+	expires  time.Time
+}
+
+// defaultCheckEvery bounds how long a cached snapshot may serve before the
+// next file stat.
+const defaultCheckEvery = time.Second
 
 // NewHostKeysResolver builds a resolver bound to the host process arguments.
 func NewHostKeysResolver() HostKeysResolver {
-	cache := &hostKeysCache{}
+	cache := &hostKeysCache{checkEvery: defaultCheckEvery}
 	return cache.resolve
 }
 
@@ -48,32 +69,39 @@ func HostConfigPath() string {
 }
 
 func (c *hostKeysCache) resolve() (HostKeysSnapshot, error) {
+	if cached := c.fresh.Load(); cached != nil && time.Now().Before(cached.expires) {
+		return cached.snapshot, nil
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if cached := c.fresh.Load(); cached != nil && time.Now().Before(cached.expires) {
+		return cached.snapshot, nil
+	}
 	if c.path == "" {
 		c.path = resolveConfigFile(os.Args, os.Getwd)
 	}
 	info, errStat := os.Stat(c.path)
 	if errStat != nil {
 		if c.loaded {
-			return c.snapshot, nil
+			return c.markFresh(), nil
 		}
 		return HostKeysSnapshot{}, fmt.Errorf("stat host config: %w", errStat)
 	}
 	if c.loaded && info.ModTime().Equal(c.modTime) && info.Size() == c.size {
-		return c.snapshot, nil
+		return c.markFresh(), nil
 	}
 	raw, errRead := os.ReadFile(c.path)
 	if errRead != nil {
 		if c.loaded {
-			return c.snapshot, nil
+			return c.markFresh(), nil
 		}
 		return HostKeysSnapshot{}, fmt.Errorf("read host config: %w", errRead)
 	}
 	snapshot, errParse := parseHostAPIKeys(raw)
 	if errParse != nil {
 		if c.loaded {
-			return c.snapshot, nil
+			return c.markFresh(), nil
 		}
 		return HostKeysSnapshot{}, errParse
 	}
@@ -81,7 +109,16 @@ func (c *hostKeysCache) resolve() (HostKeysSnapshot, error) {
 	c.modTime = info.ModTime()
 	c.size = info.Size()
 	c.loaded = true
-	return c.snapshot, nil
+	return c.markFresh(), nil
+}
+
+// markFresh republishes the current snapshot with a renewed freshness window.
+// Callers must hold c.mu.
+func (c *hostKeysCache) markFresh() HostKeysSnapshot {
+	if c.checkEvery > 0 {
+		c.fresh.Store(&freshSnapshot{snapshot: c.snapshot, expires: time.Now().Add(c.checkEvery)})
+	}
+	return c.snapshot
 }
 
 // parseHostAPIKeys returns the api-keys list preserving first-seen order and

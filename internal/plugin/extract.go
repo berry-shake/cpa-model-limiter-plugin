@@ -1,10 +1,11 @@
 package plugin
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/tidwall/gjson"
 )
 
 // ExtractAPIKey pulls the inbound credential from the same sources the host
@@ -36,14 +37,14 @@ func bearerToken(header string) string {
 	if header == "" {
 		return ""
 	}
-	parts := strings.SplitN(header, " ", 2)
-	if len(parts) != 2 {
+	scheme, token, found := strings.Cut(header, " ")
+	if !found {
 		return header
 	}
-	if !strings.EqualFold(parts[0], "bearer") {
+	if !strings.EqualFold(scheme, "bearer") {
 		return header
 	}
-	return strings.TrimSpace(parts[1])
+	return strings.TrimSpace(token)
 }
 
 // ExtractModel resolves the requested model from the URL path (Gemini-style
@@ -79,17 +80,18 @@ func modelFromPath(path string) string {
 	return strings.TrimSpace(rest)
 }
 
+// modelFromBody reads the top-level "model" field with gjson, the same way the
+// host handlers do, so extraction stops at the field instead of decoding the
+// whole payload.
 func modelFromBody(body []byte) string {
 	if len(body) == 0 {
 		return ""
 	}
-	var payload struct {
-		Model string `json:"model"`
-	}
-	if errUnmarshal := json.Unmarshal(body, &payload); errUnmarshal != nil {
+	result := gjson.GetBytes(body, "model")
+	if result.Type != gjson.String {
 		return ""
 	}
-	return strings.TrimSpace(payload.Model)
+	return strings.TrimSpace(result.Str)
 }
 
 // StripThinkingSuffix removes a trailing "(value)" thinking suffix, mirroring
