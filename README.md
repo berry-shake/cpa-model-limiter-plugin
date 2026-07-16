@@ -53,8 +53,8 @@ plugins:
         name: Model Limiter
         description: Restrict which models each inbound API key may use.
         author: berry-shake
-        version: 0.1.3
-        release-tag: v0.1.3
+        version: 0.1.6
+        release-tag: v0.1.6
         repository: https://github.com/berry-shake/cpa-model-limiter-plugin
         install:
           type: github-release
@@ -164,7 +164,9 @@ Behavior notes:
 - The host `api-keys` list is read from the same config file the server
   loaded (`--config` flag or `config.yaml` in the working directory) and is
   cached until the file changes; a transient read or parse failure falls back
-  to the last good snapshot.
+  to the last good snapshot. On the auth hot path the cached snapshot is
+  served lock-free for up to one second between file checks, so a config
+  edit takes at most one second to be noticed.
 - A failed plugin config reload resets to empty rules instead of keeping
   stale ones: keys in `api-keys` become temporarily unrestricted rather than
   locked out. The parse error is logged through the host logger.
@@ -192,7 +194,7 @@ unrestricted keys):
 ```bash
 go test ./...
 go build -buildmode=c-shared \
-  -ldflags '-X main.pluginVersion=0.1.3-dev' \
+  -ldflags '-X main.pluginVersion=0.1.6-dev' \
   -o model-limiter.dylib .
 ```
 
