@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 func fakeHostKeys(keys ...string) HostKeysResolver {
@@ -188,6 +188,161 @@ keys:
 			}
 			if tt.want && resp.Principal == "" {
 				t.Fatal("principal should be set on success")
+			}
+		})
+	}
+}
+
+// zstdLike stands in for a compressed body: bytes the plugin cannot parse.
+var zstdLike = []byte{0x28, 0xb5, 0x2f, 0xfd, 0x04, 0x00, 0x51, 0x00}
+
+func restrictedService(t *testing.T) *Service {
+	t.Helper()
+	service := New("1.0.0", nil, fakeHostKeys("sk-alpha", "sk-open"))
+	service.Call(pluginabi.MethodPluginRegister, registerPayload(t, `
+keys:
+  - api-key: sk-alpha
+    models: [gpt-5.2]
+`))
+	return service
+}
+
+func TestAuthenticateDenyStatus(t *testing.T) {
+	t.Parallel()
+
+	service := restrictedService(t)
+	denied := service.Authenticate(pluginapi.FrontendAuthRequest{
+		Path:    "/v1/chat/completions",
+		Headers: http.Header{"Authorization": {"Bearer sk-alpha"}},
+		Body:    []byte(`{"model":"gemini-2.5-pro"}`),
+	})
+	if denied.Authenticated || denied.DenyStatusCode != http.StatusForbidden {
+		t.Fatalf("denied model = %+v, want 403", denied)
+	}
+	if !strings.Contains(denied.DenyMessage, "gemini-2.5-pro") {
+		t.Fatalf("deny message should name the model, got %q", denied.DenyMessage)
+	}
+
+	// Unknown keys stay unhandled so the host answers with its own 401.
+	unknown := service.Authenticate(pluginapi.FrontendAuthRequest{
+		Path:    "/v1/chat/completions",
+		Headers: http.Header{"Authorization": {"Bearer sk-unknown"}},
+		Body:    []byte(`{"model":"gpt-5.2"}`),
+	})
+	if unknown.Authenticated || unknown.DenyStatusCode != 0 || unknown.DenyMessage != "" {
+		t.Fatalf("unknown key = %+v, want empty response", unknown)
+	}
+}
+
+func TestAuthenticateEncodedBodies(t *testing.T) {
+	t.Parallel()
+
+	service := restrictedService(t)
+	zstd := http.Header{"Content-Encoding": {"zstd"}}
+	tests := []struct {
+		name       string
+		key        string
+		headers    http.Header
+		body       []byte
+		decoded    []byte
+		want       bool
+		wantStatus int
+		wantModel  string
+	}{
+		{name: "decoded allowed model", key: "sk-alpha", headers: zstd, body: zstdLike, decoded: []byte(`{"model":"gpt-5.2"}`), want: true, wantModel: "gpt-5.2"},
+		{name: "decoded denied model", key: "sk-alpha", headers: zstd, body: zstdLike, decoded: []byte(`{"model":"gemini-2.5-pro"}`), wantStatus: http.StatusForbidden},
+		{
+			// The raw body must not be consulted once a decoded copy exists.
+			name: "decoded body wins over raw", key: "sk-alpha", headers: zstd,
+			body: []byte(`{"model":"gpt-5.2"}`), decoded: []byte(`{"model":"gemini-2.5-pro"}`), wantStatus: http.StatusForbidden,
+		},
+		{
+			// Older hosts or long coding lists: the handler may still decode
+			// what the plugin cannot read, so restricted keys fail closed.
+			name: "undecoded body rejected for restricted key", key: "sk-alpha", headers: zstd, body: zstdLike, wantStatus: http.StatusUnsupportedMediaType,
+		},
+		{
+			// A decoy object ahead of the real frame must not be trusted.
+			name: "undecoded body with decoy model rejected", key: "sk-alpha", headers: zstd,
+			body: append(append([]byte{0x50, 0x2a, 0x4d, 0x18, 19, 0, 0, 0}, `{"model":"gpt-5.2"}`...), zstdLike...), wantStatus: http.StatusUnsupportedMediaType,
+		},
+		{name: "undecoded body passes for unrestricted key", key: "sk-open", headers: zstd, body: zstdLike, want: true},
+		{
+			// The handler falls back to a raw body that is valid JSON.
+			name: "undecodable JSON body checked as is", key: "sk-alpha", headers: http.Header{"Content-Encoding": {"gzip"}},
+			body: []byte(`{"model":"gemini-2.5-pro"}`), wantStatus: http.StatusForbidden,
+		},
+		{name: "identity encoding is plain", key: "sk-alpha", headers: http.Header{"Content-Encoding": {"identity"}}, body: []byte(`{"model":"gpt-5.2"}`), want: true, wantModel: "gpt-5.2"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			headers := tt.headers.Clone()
+			headers.Set("Authorization", "Bearer "+tt.key)
+			resp := service.Authenticate(pluginapi.FrontendAuthRequest{
+				Method:      http.MethodPost,
+				Path:        "/v1/chat/completions",
+				Headers:     headers,
+				Body:        tt.body,
+				DecodedBody: tt.decoded,
+			})
+			if resp.Authenticated != tt.want || resp.DenyStatusCode != tt.wantStatus {
+				t.Fatalf("got authenticated=%v status=%d, want %v/%d", resp.Authenticated, resp.DenyStatusCode, tt.want, tt.wantStatus)
+			}
+			if tt.want && resp.Metadata["model"] != tt.wantModel {
+				t.Fatalf("metadata model = %q, want %q", resp.Metadata["model"], tt.wantModel)
+			}
+		})
+	}
+}
+
+func TestAuthenticateDecodedBodyViaRPCMethod(t *testing.T) {
+	t.Parallel()
+
+	service := restrictedService(t)
+	// The host marshals pluginapi.FrontendAuthRequest as is, so DecodedBody
+	// crosses the RPC boundary under its Go field name.
+	raw, errMarshal := json.Marshal(pluginapi.FrontendAuthRequest{
+		Method:      http.MethodPost,
+		Path:        "/v1/chat/completions",
+		Headers:     http.Header{"Authorization": {"Bearer sk-alpha"}, "Content-Encoding": {"zstd"}},
+		Body:        zstdLike,
+		DecodedBody: []byte(`{"model":"gemini-2.5-pro"}`),
+	})
+	if errMarshal != nil {
+		t.Fatal(errMarshal)
+	}
+	var resp pluginapi.FrontendAuthResponse
+	decodeEnvelope(t, service.Call(pluginabi.MethodFrontendAuthAuthenticate, raw), &resp)
+	if resp.Authenticated || resp.DenyStatusCode != http.StatusForbidden {
+		t.Fatalf("resp = %+v, want 403 deny", resp)
+	}
+}
+
+func TestRegisterNegotiatesSchemaVersion(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		payload []byte
+		want    uint32
+	}{
+		{name: "no payload", payload: nil, want: 1},
+		{name: "host without schema", payload: []byte(`{"config_yaml":null}`), want: 1},
+		{name: "older host", payload: []byte(`{"schema_version":3}`), want: 3},
+		{name: "host at pinned schema", payload: []byte(`{"schema_version":6}`), want: 6},
+		{name: "newer host", payload: []byte(`{"schema_version":10,"multi_auth_providers":true}`), want: maxSchemaVersion},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			service := New("1.0.0", nil, fakeHostKeys())
+			for _, method := range []string{pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure} {
+				var registration rpcRegistration
+				decodeEnvelope(t, service.Call(method, tt.payload), &registration)
+				if registration.SchemaVersion != tt.want {
+					t.Fatalf("%s schema_version = %d, want %d", method, registration.SchemaVersion, tt.want)
+				}
 			}
 		})
 	}

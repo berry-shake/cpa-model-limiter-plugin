@@ -66,7 +66,7 @@ import (
 	"unsafe"
 
 	pluginruntime "github.com/berry-shake/cpa-model-limiter-plugin/internal/plugin"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 )
 
 var (

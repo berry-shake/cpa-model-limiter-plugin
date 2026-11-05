@@ -3,6 +3,7 @@ package plugin
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -53,6 +54,40 @@ func TestParseHostAPIKeys(t *testing.T) {
 
 	if _, errBad := parseHostAPIKeys([]byte(":\tnot yaml")); errBad == nil {
 		t.Fatal("invalid yaml should fail")
+	}
+}
+
+func TestParseHostAPIKeysConfigLayouts(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		raw  string
+		want []string
+	}{
+		{name: "v8 access list", raw: "config-version: 8\naccess:\n  api-keys:\n    - sk-v8\n", want: []string{"sk-v8"}},
+		{
+			// v8 reuses the top-level name for upstream provider keys.
+			name: "v8 upstream mapping ignored",
+			raw:  "config-version: 8\naccess:\n  api-keys: [sk-v8]\napi-keys:\n  codex: [{api-key: sk-upstream}]\n  claude:\n    - api-key: sk-claude\n",
+			want: []string{"sk-v8"},
+		},
+		{name: "v8 wins over legacy", raw: "access:\n  api-keys: [sk-v8]\napi-keys: [sk-legacy]\n", want: []string{"sk-v8"}},
+		{name: "empty v8 list still wins", raw: "access:\n  api-keys: []\napi-keys: [sk-legacy]\n", want: nil},
+		{name: "legacy list without access", raw: "access: {}\napi-keys: [sk-legacy]\n", want: []string{"sk-legacy"}},
+		{name: "upstream mapping only", raw: "api-keys:\n  codex: [{api-key: sk-upstream}]\n", want: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			snap, errParse := parseHostAPIKeys([]byte(tt.raw))
+			if errParse != nil {
+				t.Fatal(errParse)
+			}
+			if !slices.Equal(snap.Ordered, tt.want) || len(snap.Set) != len(tt.want) {
+				t.Fatalf("keys = %v, want %v", snap.Ordered, tt.want)
+			}
+		})
 	}
 }
 

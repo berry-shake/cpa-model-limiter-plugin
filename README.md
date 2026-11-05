@@ -29,7 +29,9 @@ below.
 
 ## Requirements
 
-- CLIProxyAPI v7.2.71 or newer with dynamic plugin support
+- CLIProxyAPI v7.2.71 or newer with dynamic plugin support; v8.0.40 or newer
+  recommended (explicit 403 for blocked models since v8.0.39, decoded
+  compressed bodies since v8.0.40)
 - Linux amd64/arm64, macOS amd64/arm64, or Windows amd64
 - cgo-enabled CLIProxyAPI build on Unix platforms
 
@@ -53,8 +55,8 @@ plugins:
         name: Model Limiter
         description: Restrict which models each inbound API key may use.
         author: berry-shake
-        version: 0.2.0
-        release-tag: v0.2.0
+        version: 0.3.0
+        release-tag: v0.3.0
         repository: https://github.com/berry-shake/cpa-model-limiter-plugin
         install:
           type: github-release
@@ -87,11 +89,12 @@ Example — `sk-team-a` and `sk-team-b` are model-restricted; all keys,
 restricted or not, stay in the host `api-keys` list:
 
 ```yaml
-api-keys:
-  - sk-admin           # unrestricted
-  - sk-ci              # unrestricted
-  - sk-team-a          # restricted below
-  - sk-team-b          # restricted below
+access:
+  api-keys:
+    - sk-admin         # unrestricted
+    - sk-ci            # unrestricted
+    - sk-team-a        # restricted below
+    - sk-team-b        # restricted below
 
 plugins:
   enabled: true
@@ -166,9 +169,18 @@ Behavior notes:
   both are present.
 - Requests without a resolvable model (for example `GET /v1/models`) only go
   through the key check.
+- Compressed (`Content-Encoding: zstd`) bodies are checked through the decoded
+  copy CLIProxyAPI v8.0.40+ passes to auth plugins. When a restricted key sends
+  an encoded body the plugin cannot read (older hosts, or coding lists the host
+  leaves to the handler) and the model is not in the URL path, the request is
+  rejected with 415 instead of skipping the model check; the still-encoded
+  bytes are never searched for a model. Unrestricted keys are not affected.
 - Keys are compared exactly after trimming surrounding whitespace.
 - The host `api-keys` list is read from the same config file the server
   loaded (`--config` flag or `config.yaml` in the working directory) and is
+  taken from `access.api-keys` (v8 layout) or, in legacy files without it,
+  the top-level `api-keys` list. A top-level `api-keys` mapping is the v8
+  upstream key section and is never treated as client keys. The list is
   cached until the file changes; a transient read or parse failure falls back
   to the last good snapshot. On the auth hot path the cached snapshot is
   served lock-free for up to one second between file checks, so a config
@@ -176,9 +188,11 @@ Behavior notes:
 - A failed plugin config reload resets to empty rules instead of keeping
   stale ones: keys in `api-keys` become temporarily unrestricted rather than
   locked out. The parse error is logged through the host logger.
-- Rejections surface to clients as HTTP 401 (the host access manager owns the
-  error shape), not as a 403 "model not allowed" message. Rejected requests
-  are logged with a masked key and the offending model.
+- A known key requesting a blocked model gets HTTP 403 with
+  `{"error":"model \"<model>\" is not allowed for this API key"}`. Missing or
+  unknown keys still get the host's own 401. Hosts older than v8.0.39 ignore
+  the explicit deny and answer 401 for both. Rejected requests are logged with
+  a masked key and the offending model.
 
 ## Fail-closed notes
 
@@ -200,7 +214,7 @@ unrestricted keys):
 ```bash
 go test ./...
 go build -buildmode=c-shared \
-  -ldflags '-X main.pluginVersion=0.2.0-dev' \
+  -ldflags '-X main.pluginVersion=0.3.0-dev' \
   -o model-limiter.dylib .
 ```
 
@@ -219,6 +233,6 @@ C header; the host does not need it.
   concurrent readers never see a partial file. Comments and unrelated
   settings are preserved by rewriting only the `plugins.configs.model-limiter.keys`
   subtree.
-- API keys live in the host `config.yaml` under `api-keys` and
-  `plugins.configs`; protect the file accordingly.
+- API keys live in the host `config.yaml` under `access.api-keys` (legacy:
+  `api-keys`) and `plugins.configs`; protect the file accordingly.
 - Logs mask keys (`sk-a****klmn`) and never include full credentials.

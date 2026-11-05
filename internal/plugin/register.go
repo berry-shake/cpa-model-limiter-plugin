@@ -3,13 +3,14 @@ package plugin
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
 	"sync"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 // ProviderID is the frontend auth provider identifier reported to the host.
@@ -21,6 +22,13 @@ const (
 	configKeys           = "keys"
 	configAllowedOrigins = "allowed_origins"
 )
+
+// maxSchemaVersion is the newest plugin RPC contract this plugin implements.
+// Schema 6 makes the host return management JSON verbatim instead of
+// HTML-escaping its strings. It is pinned rather than taken from
+// pluginabi.SchemaVersion so an SDK bump cannot silently opt into newer
+// contracts or make older hosts refuse to load the plugin.
+const maxSchemaVersion = pluginabi.SchemaVersionRawManagementResponse
 
 // LogFunc forwards a log line to the host logger.
 type LogFunc func(level, message string, fields map[string]any)
@@ -53,7 +61,8 @@ type rpcIdentifierResponse struct {
 }
 
 type rpcLifecycleRequest struct {
-	ConfigYAML []byte `json:"config_yaml"`
+	ConfigYAML    []byte `json:"config_yaml"`
+	SchemaVersion uint32 `json:"schema_version"`
 }
 
 type resourceDeclaration struct {
@@ -109,7 +118,7 @@ func (s *Service) Call(method string, request []byte) []byte {
 	case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
 		s.applyConfig(request)
 		return okEnvelope(rpcRegistration{
-			SchemaVersion: pluginabi.SchemaVersion,
+			SchemaVersion: negotiateSchemaVersion(request),
 			Metadata: pluginapi.Metadata{
 				Name:             "Model Limiter",
 				Version:          s.version,
@@ -191,6 +200,17 @@ func (s *Service) applyConfig(request []byte) {
 	s.logFn("info", "model-limiter: configuration applied", map[string]any{"rules": len(cfg.Rules)})
 }
 
+// negotiateSchemaVersion answers plugin.register with the newest schema both
+// sides implement. Hosts advertise theirs in the lifecycle request; one that
+// advertises nothing only knows the original contract.
+func negotiateSchemaVersion(request []byte) uint32 {
+	var lifecycle rpcLifecycleRequest
+	if errUnmarshal := json.Unmarshal(request, &lifecycle); errUnmarshal != nil || lifecycle.SchemaVersion == 0 {
+		return 1
+	}
+	return min(lifecycle.SchemaVersion, maxSchemaVersion)
+}
+
 func (s *Service) snapshot() Config {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -250,10 +270,14 @@ func (s *Service) ApplyRules(rules []RuleEntry) ([]RuleEntry, error) {
 //
 //  1. key must be present in the host api-keys list, otherwise reject;
 //  2. a key without a rule is unrestricted;
-//  3. a key with a rule must request an allowed model.
+//  3. a key with a rule must request an allowed model, and its body must be
+//     readable so the model the handler runs is the one checked here.
 //
 // Rules only subtract capability from keys that api-keys already grants; a
-// rule for a key missing from api-keys never admits it.
+// rule for a key missing from api-keys never admits it. Unknown keys get an
+// empty response so the host answers with its usual 401; known keys that a
+// rule blocks get an explicit deny (CLIProxyAPI v8.0.39+ forwards it, older
+// hosts fall back to 401).
 func (s *Service) Authenticate(req pluginapi.FrontendAuthRequest) pluginapi.FrontendAuthResponse {
 	key := ExtractAPIKey(req.Headers, req.Query)
 	if key == "" {
@@ -269,14 +293,39 @@ func (s *Service) Authenticate(req pluginapi.FrontendAuthRequest) pluginapi.Fron
 		return pluginapi.FrontendAuthResponse{}
 	}
 
-	model := ExtractModel(req.Path, req.Body)
+	// Body is the raw bytes as received; for content-encoded requests the
+	// host also sends the decoded body the handler will parse. A body that
+	// stays encoded is never searched for a model: gjson skips leading binary
+	// bytes, so a decoy object inside, say, a zstd skippable frame would be
+	// read while the handler decodes and runs a different model.
+	body := req.Body
+	unreadable := encodedBodyUnreadable(req)
+	if req.DecodedBody != nil {
+		body = req.DecodedBody
+	} else if unreadable {
+		body = nil
+	}
+	model := ExtractModel(req.Path, body)
 	if rule, restricted := s.snapshot().RuleForKey(key); restricted {
+		if model == "" && unreadable {
+			s.logFn("warn", "model-limiter: encoded body unreadable for restricted key", map[string]any{
+				"key":      MaskKey(key),
+				"encoding": req.Headers.Get("Content-Encoding"),
+			})
+			return pluginapi.FrontendAuthResponse{
+				DenyStatusCode: http.StatusUnsupportedMediaType,
+				DenyMessage:    "request content encoding is not supported for this API key",
+			}
+		}
 		if model != "" && !rule.AllowsModel(model) {
 			s.logFn("warn", "model-limiter: model not allowed for key", map[string]any{
 				"key":   MaskKey(key),
 				"model": model,
 			})
-			return pluginapi.FrontendAuthResponse{}
+			return pluginapi.FrontendAuthResponse{
+				DenyStatusCode: http.StatusForbidden,
+				DenyMessage:    fmt.Sprintf("model %q is not allowed for this API key", model),
+			}
 		}
 	}
 
@@ -288,6 +337,21 @@ func (s *Service) Authenticate(req pluginapi.FrontendAuthRequest) pluginapi.Fron
 			"model":    model,
 		},
 	}
+}
+
+// encodedBodyUnreadable reports whether the handler may run a body the plugin
+// cannot inspect: the request is content-encoded, the host sent no decoded
+// copy (hosts before v8.0.40, or a coding list the host leaves to the
+// handler), and the raw bytes are not the JSON the handler falls back to.
+func encodedBodyUnreadable(req pluginapi.FrontendAuthRequest) bool {
+	if req.DecodedBody != nil || len(req.Body) == 0 {
+		return false
+	}
+	encoding := strings.TrimSpace(req.Headers.Get("Content-Encoding"))
+	if encoding == "" || strings.EqualFold(encoding, "identity") {
+		return false
+	}
+	return !json.Valid(req.Body)
 }
 
 func okEnvelope(result any) []byte {

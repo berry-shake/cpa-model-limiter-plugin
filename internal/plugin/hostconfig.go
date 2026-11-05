@@ -123,16 +123,34 @@ func (c *hostKeysCache) markFresh() HostKeysSnapshot {
 
 // parseHostAPIKeys returns the api-keys list preserving first-seen order and
 // de-duplicated, alongside a set for membership lookups.
+//
+// It follows the host's config layouts: the v8 access.api-keys wins whenever
+// present, even when empty; otherwise the legacy top-level api-keys list is
+// used. In the v8 layout a top-level api-keys mapping holds upstream provider
+// keys and never grants client access.
 func parseHostAPIKeys(raw []byte) (HostKeysSnapshot, error) {
 	var parsed struct {
-		APIKeys []string `yaml:"api-keys"`
+		APIKeys yaml.Node `yaml:"api-keys"`
+		Access  struct {
+			APIKeys yaml.Node `yaml:"api-keys"`
+		} `yaml:"access"`
 	}
 	if errYAML := yaml.Unmarshal(raw, &parsed); errYAML != nil {
 		return HostKeysSnapshot{}, fmt.Errorf("parse host config: %w", errYAML)
 	}
-	ordered := make([]string, 0, len(parsed.APIKeys))
-	set := make(map[string]struct{}, len(parsed.APIKeys))
-	for _, key := range parsed.APIKeys {
+	source := &parsed.Access.APIKeys
+	if source.IsZero() && parsed.APIKeys.Kind != yaml.MappingNode {
+		source = &parsed.APIKeys
+	}
+	var keys []string
+	if !source.IsZero() {
+		if errDecode := source.Decode(&keys); errDecode != nil {
+			return HostKeysSnapshot{}, fmt.Errorf("parse host api-keys: %w", errDecode)
+		}
+	}
+	ordered := make([]string, 0, len(keys))
+	set := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
 		key = strings.TrimSpace(key)
 		if key == "" {
 			continue
