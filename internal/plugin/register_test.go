@@ -259,12 +259,13 @@ keys:
 	}
 }
 
-func TestManagementRegisterExposesPanelResource(t *testing.T) {
+func TestManagementRegisterSplitsResourcesAndManagementRoutes(t *testing.T) {
 	t.Parallel()
 
 	service := New("1.0.0", nil, fakeHostKeys())
+	raw := service.Call(pluginabi.MethodManagementRegister, nil)
 	var registration managementRegistration
-	decodeEnvelope(t, service.Call(pluginabi.MethodManagementRegister, nil), &registration)
+	decodeEnvelope(t, raw, &registration)
 	paths := map[string]resourceDeclaration{}
 	for _, res := range registration.Resources {
 		paths[res.Path] = res
@@ -273,14 +274,31 @@ func TestManagementRegisterExposesPanelResource(t *testing.T) {
 	if !okPanel || panel.Menu == "" {
 		t.Fatalf("panel resource must be a menu entry, got %+v", panel)
 	}
-	for _, sub := range []string{"/state", "/apply", "/logo.png"} {
-		res, ok := paths[sub]
-		if !ok {
-			t.Fatalf("missing resource %q, got %+v", sub, registration.Resources)
+	if logo, ok := paths["/logo.png"]; !ok || logo.Menu != "" {
+		t.Fatalf("logo must be a non-menu resource, got %+v", registration.Resources)
+	}
+	for _, private := range []string{"/state", "/apply"} {
+		if _, ok := paths[private]; ok {
+			t.Fatalf("%q must not be an unauthenticated resource", private)
 		}
-		if res.Menu != "" {
-			t.Fatalf("%q must not surface as a menu entry, got %+v", sub, res)
+	}
+
+	// Decode with the host's shape: CPA reads routes into pluginapi.ManagementRoute.
+	var host struct {
+		Routes []pluginapi.ManagementRoute `json:"routes"`
+	}
+	decodeEnvelope(t, raw, &host)
+	got := map[string]string{}
+	for _, route := range host.Routes {
+		got[route.Method+" "+route.Path] = route.Description
+	}
+	for _, want := range []string{http.MethodGet + " " + statePath, http.MethodPost + " " + applyPath} {
+		if _, ok := got[want]; !ok {
+			t.Fatalf("missing management route %q, got %+v", want, host.Routes)
 		}
+	}
+	if len(host.Routes) != 2 {
+		t.Fatalf("unexpected management routes: %+v", host.Routes)
 	}
 }
 
@@ -332,7 +350,7 @@ func TestManagementHandleServesPanelPage(t *testing.T) {
 	}
 }
 
-func TestManagementHandleRejectsNonGetAndUnknownPath(t *testing.T) {
+func TestManagementHandleRejectsWrongMethodAndUnknownPath(t *testing.T) {
 	t.Parallel()
 
 	service := New("1.0.0", nil, fakeHostKeys())
@@ -341,7 +359,13 @@ func TestManagementHandleRejectsNonGetAndUnknownPath(t *testing.T) {
 	if post.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("post status = %d", post.StatusCode)
 	}
-	missing := service.handleManagement(managementRPCRequest{Method: http.MethodGet, Path: "/v0/resource/plugins/model-limiter/nope"})
+	for _, path := range []string{"/v0/resource/plugins/model-limiter/nope", "/v0/resource/plugins/model-limiter/state"} {
+		missing := service.handleManagement(managementRPCRequest{Method: http.MethodGet, Path: path})
+		if missing.StatusCode != http.StatusNotFound {
+			t.Fatalf("%s status = %d", path, missing.StatusCode)
+		}
+	}
+	missing := service.handleManagement(managementRPCRequest{Method: http.MethodGet, Path: "/v0/management/plugins/model-limiter/nope"})
 	if missing.StatusCode != http.StatusNotFound {
 		t.Fatalf("missing status = %d", missing.StatusCode)
 	}

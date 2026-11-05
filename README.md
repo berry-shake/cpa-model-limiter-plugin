@@ -19,13 +19,13 @@ rule for a key missing from `api-keys` never admits it.
 
 The plugin also ships a **Model Limiter** menu page for the official
 management panel: it lists every host API key, shows which are restricted,
-and lets you edit model patterns per key. The page auto-loads without a
-management key and saves rule changes by rewriting `config.yaml` directly.
-The host detects the file change and hot-reloads the plugin configuration
-immediately. See [Panel endpoints](#panel-endpoints) below — the read/write
-endpoints are **unauthenticated at the host layer**, but the panel denies
-iframe embedding and rejects cross-origin browser requests by default
-(configurable via `allowed_origins`).
+and lets you edit model patterns per key. Rule changes are saved by rewriting
+`config.yaml` directly; the host detects the file change and hot-reloads the
+plugin configuration immediately. The data endpoints are `/v0/management`
+routes, so the host checks the management key before the plugin sees the
+request. Inside the management panel the page reuses the key the panel
+remembered; otherwise it asks for one. See [Panel endpoints](#panel-endpoints)
+below.
 
 ## Requirements
 
@@ -53,8 +53,8 @@ plugins:
         name: Model Limiter
         description: Restrict which models each inbound API key may use.
         author: berry-shake
-        version: 0.1.7
-        release-tag: v0.1.7
+        version: 0.2.0
+        release-tag: v0.2.0
         repository: https://github.com/berry-shake/cpa-model-limiter-plugin
         install:
           type: github-release
@@ -81,7 +81,7 @@ plugins:
 | Key | Type | Description |
 | --- | --- | --- |
 | `keys` | list | Restriction rules. Each entry has `api-key` (string, required, unique) and `models` (string list, optional). `*` wildcards are allowed in model patterns. An empty or missing `models` list allows every model for that key. The key must also exist in the host `api-keys` list; a rule alone never grants access. Keys without a rule are unrestricted. |
-| `allowed_origins` | string | Comma-separated list of trusted origins that may iframe the panel and call `/state`/`/apply` cross-origin. Blank (default) applies the strictest posture: iframe embedding is denied via `frame-ancestors 'none'` and cross-origin browser requests are rejected. |
+| `allowed_origins` | string | Comma-separated list of extra origins that may iframe the panel page. Blank (default) allows only same-origin embedding (`frame-ancestors 'self'`), which is what the CPA management panel needs. The data endpoints always require the management key regardless of this setting. |
 
 Example — `sk-team-a` and `sk-team-b` are model-restricted; all keys,
 restricted or not, stay in the host `api-keys` list:
@@ -114,27 +114,38 @@ panel; it validates input and writes `config.yaml` directly.
 
 ### Panel endpoints
 
-The panel page is served at `/v0/resource/plugins/model-limiter/panel` and
-talks to two same-origin JSON endpoints:
+The panel page is served at `/v0/resource/plugins/model-limiter/panel`
+(unauthenticated, page shell only) and talks to two management routes:
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/v0/resource/plugins/model-limiter/state` | Returns `{plugin_version, api_keys, rules}`. |
-| GET | `/v0/resource/plugins/model-limiter/apply?rules=<base64url json>` | Parses the payload (`[{"api_key":"...","models":[...]}]`), rewrites `config.yaml`, and returns the updated state. Pass `rules=W10` (base64 of `[]`) to clear every rule. |
+| GET | `/v0/management/plugins/model-limiter/state` | Returns `{plugin_version, api_keys, rules}`. |
+| POST | `/v0/management/plugins/model-limiter/apply` | Body `{"rules":[{"api_key":"...","models":[...]}]}`. Rewrites `config.yaml` and returns the updated state. Send `{"rules":[]}` to clear every rule; a body without `rules` is rejected. |
 
-Both endpoints are **unauthenticated at the host layer** — the host restricts
-`/v0/resource/*` routes to `GET`, so writes are encoded in the query string.
-The plugin defends browsers on top of that:
+The host's management middleware checks `Authorization: Bearer <management key>`
+before forwarding either route (and applies its usual remote-management and IP
+ban rules), so a missing or wrong key gets 401/403 from the host itself:
 
-- The panel page ships with `Content-Security-Policy: frame-ancestors 'none'`
-  by default, so no other page can iframe it.
-- `/state` and `/apply` reject cross-origin browser requests unless the
-  request's `Origin` (falling back to `Referer`) matches `allowed_origins`.
-  Detection uses `Sec-Fetch-Site` first, then `Origin`; requests without any
-  browser context headers (CLI tools) still pass so the endpoints remain
-  scriptable from the host.
+```bash
+curl -H "Authorization: Bearer $MANAGEMENT_KEY" \
+  http://127.0.0.1:8317/v0/management/plugins/model-limiter/state
 
-Add trusted origins with `allowed_origins`:
+curl -X POST -H "Authorization: Bearer $MANAGEMENT_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"rules":[{"api_key":"sk-team-a","models":["gpt-5*"]}]}' \
+  http://127.0.0.1:8317/v0/management/plugins/model-limiter/apply
+```
+
+How the page gets the key:
+
+- Opened inside the CPA management panel (same-origin iframe), it reads the
+  key the panel saved in `localStorage` when "remember password" is checked.
+  It understands both the official panel and CPAMP storage formats, only uses
+  a key saved for this origin, and never writes it back.
+- Otherwise, or when the host rejects the saved key, it shows a sign-in form.
+  The key entered there stays in page memory only; a reload asks again.
+
+Add extra origins that may iframe the page with `allowed_origins`:
 
 ```yaml
 plugins:
@@ -142,11 +153,6 @@ plugins:
     model-limiter:
       allowed_origins: "https://ops.example.com,https://intranet.example.com"
 ```
-
-Anyone reaching the HTTP port from a non-browser client (`curl`, scripts) can
-still read the api-keys list and rewrite the rule set. Bind the server to a
-trusted network, put it behind a proxy that enforces auth on
-`/v0/resource/*`, or disable the plugin if that trade-off is unacceptable.
 
 Behavior notes:
 
@@ -194,7 +200,7 @@ unrestricted keys):
 ```bash
 go test ./...
 go build -buildmode=c-shared \
-  -ldflags '-X main.pluginVersion=0.1.7-dev' \
+  -ldflags '-X main.pluginVersion=0.2.0-dev' \
   -o model-limiter.dylib .
 ```
 
@@ -203,13 +209,12 @@ C header; the host does not need it.
 
 ## Security notes
 
-- The panel page needs no management key: `/state` and `/apply` are
-  unauthenticated at the host layer. Browsers are gated by the panel's
-  `frame-ancestors 'none'` CSP and by the cross-origin check on
-  `/state`/`/apply`; both open up when `allowed_origins` is set. Non-browser
-  clients (curl, scripts) bypass the browser checks — restrict network
-  exposure accordingly (loopback bind, VPN, or an auth-enforcing reverse
-  proxy on `/v0/resource/*`).
+- Reading the api-keys list and rewriting rules both require the CPA
+  management key: `/state` and `/apply` are `/v0/management` routes guarded by
+  the host. Only the page shell and logo are public `/v0/resource` assets, and
+  they contain no data.
+- The panel page sends `frame-ancestors 'self'` (plus any `allowed_origins`),
+  so other sites cannot embed it.
 - Writes go straight to `config.yaml` using an atomic temp-file rename so
   concurrent readers never see a partial file. Comments and unrelated
   settings are preserved by rewriting only the `plugins.configs.model-limiter.keys`

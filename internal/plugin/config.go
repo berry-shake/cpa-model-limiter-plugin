@@ -13,10 +13,8 @@ type Config struct {
 	// unrestricted; every key (listed or not) must additionally be present
 	// in the host api-keys list to be accepted at all.
 	Rules map[string]Rule
-	// AllowedOrigins lists trusted origins that may iframe the panel and
-	// make cross-origin requests to /state and /apply. Empty means the
-	// strictest default: iframe embedding is denied (frame-ancestors 'none')
-	// and cross-origin browser requests are rejected.
+	// AllowedOrigins lists extra origins that may iframe the panel page in
+	// addition to the same-origin CPA management panel.
 	AllowedOrigins []string
 }
 

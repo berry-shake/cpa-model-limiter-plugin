@@ -218,6 +218,17 @@
     .log[data-state="ok"] { color: var(--success); background: var(--success-soft); }
     .log[data-state="error"] { color: var(--danger); background: var(--danger-soft); }
     .empty { padding: 18px; text-align: center; color: var(--text-muted); font-size: 13px; }
+    .login-form { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    .login-input {
+      flex: 1; min-width: 220px; min-height: 36px; padding: 8px 12px;
+      border: 1px solid var(--border-strong); border-radius: var(--radius-md);
+      background: var(--bg-inset); color: var(--text-primary);
+      font: inherit; font-family: var(--font-mono); font-size: 13px;
+    }
+    .login-input:focus { outline: none; border-color: var(--accent); }
+    .login-input::placeholder { color: var(--text-muted); font-family: var(--font-sans); }
+    .login-hint { margin: 10px 0 0; color: var(--text-muted); font-size: 12px; }
+    .login-error { margin: 8px 0 0; color: var(--danger); font-size: 12.5px; overflow-wrap: anywhere; }
     .hidden { display: none !important; }
     footer { margin-top: auto; padding-top: 8px; text-align: center; color: var(--text-muted); font-size: 11px; }
     footer a { color: inherit; text-decoration: none; border-bottom: 1px dashed var(--border-strong); }
@@ -256,7 +267,23 @@
     </div>
   </header>
 
-  <section class="card" id="rules-card">
+  <section class="card hidden" id="login-card">
+    <div class="card-header">
+      <h2 data-i18n="login.title">Management key</h2>
+    </div>
+    <div class="card-body">
+      <form class="login-form" id="login-form">
+        <input class="login-input" id="login-key" type="password" autocomplete="off" spellcheck="false" placeholder="CPA management key">
+        <button id="login-button" class="btn btn-primary" type="submit">
+          <span class="btn-label" data-i18n="login.submit">Sign in</span>
+        </button>
+      </form>
+      <p class="login-hint" data-i18n="login.hint">Use the CPA management key. It stays in this page's memory only; inside the management panel the remembered key is reused automatically.</p>
+      <p class="login-error hidden" id="login-error" role="alert"></p>
+    </div>
+  </section>
+
+  <section class="card hidden" id="rules-card">
     <div class="card-header">
       <h2 data-i18n="rules.title">API key rules</h2>
       <span class="hint" data-i18n="rules.hint">A key without patterns is unrestricted. Patterns support * wildcards, e.g. gpt-5*.</span>
@@ -304,8 +331,8 @@
 <script>
 (() => {
   const LANG_KEY = 'cliproxy-model-limiter-lang';
-  const STATE_URL = '/v0/resource/plugins/model-limiter/state';
-  const APPLY_URL = '/v0/resource/plugins/model-limiter/apply';
+  const STATE_URL = '/v0/management/plugins/model-limiter/state';
+  const APPLY_URL = '/v0/management/plugins/model-limiter/apply';
   const messages = {
     en: {
       title: 'Model Limiter · CLI Proxy API',
@@ -315,6 +342,15 @@
       'health.ok': '{count} keys · {rules} restricted',
       'health.dirty': 'Unsaved changes',
       'health.error': 'Error',
+      'health.locked': 'Sign-in required',
+      'login.title': 'Management key',
+      'login.placeholder': 'CPA management key',
+      'login.submit': 'Sign in',
+      'login.checking': 'Checking…',
+      'login.hint': 'Use the CPA management key. It stays in this page\'s memory only; inside the management panel the remembered key is reused automatically.',
+      'login.failed': 'Sign-in failed: {msg}',
+      'login.expired': 'Management key rejected: {msg}',
+      'log.keptEdits': 'Signed in again. Unsaved edits were kept; save them when ready.',
       'rules.title': 'API key rules',
       'rules.hint': 'A key without patterns is unrestricted. Patterns support * wildcards, e.g. gpt-5*.',
       'rules.colKey': 'API key',
@@ -350,6 +386,15 @@
       'health.ok': '{count} 个 key · {rules} 个受限',
       'health.dirty': '有未保存的修改',
       'health.error': '出错了',
+      'health.locked': '需要登录',
+      'login.title': '管理密钥',
+      'login.placeholder': 'CPA 管理密钥',
+      'login.submit': '登录',
+      'login.checking': '验证中…',
+      'login.hint': '填写 CPA 管理密钥。密钥只保存在当前页面内存中；在管理面板内打开时会自动复用面板记住的密钥。',
+      'login.failed': '登录失败：{msg}',
+      'login.expired': '管理密钥被拒绝：{msg}',
+      'log.keptEdits': '已重新登录，未保存的修改已保留，确认后再保存。',
       'rules.title': 'API key 规则',
       'rules.hint': '没有模式的 key 不受限制。模式支持 * 通配符，如 gpt-5*。',
       'rules.colKey': 'API key',
@@ -431,6 +476,70 @@
     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyPanelTheme);
   }
 
+  // Reuse the management key the CPA or CPAMP panel remembered (see
+  // cpa-access-guard web/src/store/panelAuth.ts). The panel and this page are
+  // same-origin, so they share localStorage "cli-proxy-auth": a zustand
+  // envelope XOR-obfuscated with a host-derived key. v2 payloads do not say
+  // which panel wrote them (CPAMP keys on salt|v2|host, the official panel on
+  // salt|host), so both are tried; legacy v1 also mixes in the user agent.
+  // Read only when embedded, never written back, and only for this origin.
+  const PANEL_AUTH_KEY = 'cli-proxy-auth';
+  const PANEL_SECRET_SALT = 'cli-proxy-api-webui::secure-storage';
+
+  function xorDecode(payload, keyText) {
+    const binary = atob(payload);
+    const key = new TextEncoder().encode(keyText);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i) ^ key[i % key.length];
+    return new TextDecoder().decode(bytes);
+  }
+
+  function panelAuthCandidates(raw) {
+    const host = window.location.host;
+    try {
+      if (raw.startsWith('enc::v2::')) {
+        const body = raw.slice('enc::v2::'.length);
+        return [PANEL_SECRET_SALT + '|v2|' + host, PANEL_SECRET_SALT + '|' + host].map((key) => xorDecode(body, key));
+      }
+      if (raw.startsWith('enc::v1::')) {
+        return [xorDecode(raw.slice('enc::v1::'.length), PANEL_SECRET_SALT + '|' + host + '|' + navigator.userAgent)];
+      }
+    } catch (_) { return []; }
+    return [raw];
+  }
+
+  function isThisOrigin(apiBase) {
+    try {
+      const base = /^https?:\/\//i.test(apiBase.trim()) ? apiBase.trim() : 'http://' + apiBase.trim();
+      return new URL(base).origin === window.location.origin;
+    } catch (_) { return false; }
+  }
+
+  function readPanelKey() {
+    let embedded = false;
+    try { embedded = window.self !== window.top; } catch (_) { embedded = false; }
+    if (!embedded) return '';
+    let raw = null;
+    try { raw = localStorage.getItem(PANEL_AUTH_KEY); } catch (_) { return ''; }
+    if (!raw) return '';
+    for (const decoded of panelAuthCandidates(raw)) {
+      try {
+        const parsed = JSON.parse(decoded);
+        const saved = parsed && typeof parsed === 'object' ? (parsed.state || parsed) : null;
+        // managementKey is only persisted when "remember password" is checked.
+        // A key saved for another API base belongs to another CPA; skip it.
+        if (saved && typeof saved.managementKey === 'string' && saved.managementKey.trim() &&
+            typeof saved.apiBase === 'string' && isThisOrigin(saved.apiBase)) {
+          return saved.managementKey.trim();
+        }
+      } catch (_) { /* wrong panel key for this payload; try the next one */ }
+    }
+    return '';
+  }
+
+  // The management key lives only in this closure; a reload starts over.
+  let managementKey = '';
+
   const refreshButton = document.getElementById('refresh-button');
   const saveButton = document.getElementById('save-button');
   const rulesBody = document.getElementById('rules-body');
@@ -439,11 +548,19 @@
   const health = document.getElementById('health');
   const healthLabel = document.getElementById('health-label');
   const log = document.getElementById('log');
+  const rulesCard = document.getElementById('rules-card');
+  const loginCard = document.getElementById('login-card');
+  const loginForm = document.getElementById('login-form');
+  const loginKey = document.getElementById('login-key');
+  const loginButton = document.getElementById('login-button');
+  const loginError = document.getElementById('login-error');
 
   // state.rows: [{key, patterns: [..], orphan}] — patterns empty = unrestricted.
   const state = {
     rows: [],
     savedSnapshot: '',
+    loaded: false,
+    loginError: null,
     logState: { state: 'idle', key: 'log.idle', params: null },
     healthState: { state: 'unknown', key: 'health.loading', params: null },
   };
@@ -502,13 +619,50 @@
     setHealth('ok', 'health.ok', { count: hostKeys, rules: restricted });
   }
 
-  async function api(url) {
-    const response = await fetch(url, { method: 'GET', cache: 'no-store' });
+  async function api(url, body) {
+    const init = { method: 'GET', cache: 'no-store', headers: { Authorization: 'Bearer ' + managementKey } };
+    if (body !== undefined) {
+      init.method = 'POST';
+      init.headers['Content-Type'] = 'application/json';
+      init.body = JSON.stringify(body);
+    }
+    const response = await fetch(url, init);
     const text = await response.text();
     let data;
     try { data = JSON.parse(text); } catch (_) { data = { message: text || ('HTTP ' + response.status) }; }
-    if (!response.ok) throw new Error(data.message || data.error || ('HTTP ' + response.status));
+    if (!response.ok) {
+      const error = new Error(data.message || data.error || ('HTTP ' + response.status));
+      error.status = response.status;
+      throw error;
+    }
     return data;
+  }
+
+  // CPA rejects a missing, wrong or banned management key with 401/403 before
+  // the request reaches the plugin.
+  function isAuthError(error) {
+    return !!error && (error.status === 401 || error.status === 403);
+  }
+
+  function renderLoginError() {
+    loginError.classList.toggle('hidden', !state.loginError);
+    loginError.textContent = state.loginError ? t(state.loginError.key, state.loginError.params) : '';
+  }
+
+  function showLogin(errorKey, msg) {
+    managementKey = '';
+    rulesCard.classList.add('hidden');
+    loginCard.classList.remove('hidden');
+    state.loginError = errorKey ? { key: errorKey, params: { msg } } : null;
+    renderLoginError();
+    setHealth('unknown', 'health.locked');
+  }
+
+  function showContent() {
+    loginCard.classList.add('hidden');
+    rulesCard.classList.remove('hidden');
+    state.loginError = null;
+    renderLoginError();
   }
 
   function rowsFromState(payload) {
@@ -532,6 +686,7 @@
   function ingestState(payload) {
     state.rows = rowsFromState(payload);
     state.savedSnapshot = snapshot();
+    state.loaded = true;
     renderRows();
     const hostKeys = state.rows.filter((row) => !row.orphan).length;
     const restricted = state.rows.filter((row) => row.patterns.length).length;
@@ -546,13 +701,6 @@
     setLog('working', 'log.loading');
     const payload = await api(STATE_URL);
     ingestState(payload);
-  }
-
-  function encodeRules(rules) {
-    // btoa handles ASCII only, so route UTF-8 through encodeURIComponent first
-    // to survive any non-ASCII characters that end up in a key or model pattern.
-    const utf8 = unescape(encodeURIComponent(JSON.stringify(rules)));
-    return btoa(utf8).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   }
 
   function renderRows() {
@@ -674,10 +822,11 @@
     setBusy(saveButton, true, 'rules.saving');
     setLog('working', 'log.saving');
     try {
-      const payload = await api(APPLY_URL + '?rules=' + encodeRules(rules));
+      const payload = await api(APPLY_URL, { rules });
       ingestState(payload);
       setLog('ok', 'log.saved');
     } catch (error) {
+      if (isAuthError(error)) { showLogin('login.expired', error.message); return; }
       setLog('error', 'log.saveFailed', { msg: error.message });
       setHealth('error', 'health.error');
       saveButton.disabled = false;
@@ -692,6 +841,7 @@
     try {
       await loadAll();
     } catch (error) {
+      if (isAuthError(error)) { showLogin('login.expired', error.message); return; }
       setHealth('error', 'health.error');
       setLog('error', 'log.loadFailed', { msg: error.message });
     } finally {
@@ -709,6 +859,8 @@
     healthLabel.textContent = t(state.healthState.key, state.healthState.params);
     log.textContent = t(state.logState.key, state.logState.params);
     if (isDirty()) dirtyHint.textContent = t('dirty.count', { count: countChanges() });
+    loginKey.placeholder = t('login.placeholder');
+    renderLoginError();
     document.querySelectorAll('.lang-switch button').forEach((btn) => {
       btn.classList.toggle('active', btn.dataset.lang === currentLang);
       btn.setAttribute('aria-pressed', btn.dataset.lang === currentLang ? 'true' : 'false');
@@ -732,11 +884,55 @@
   refreshButton.addEventListener('click', reload);
   saveButton.addEventListener('click', save);
 
-  applyStaticI18n();
-  loadAll().catch((error) => {
-    setHealth('error', 'health.error');
-    setLog('error', 'log.loadFailed', { msg: error.message });
+  loginForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const key = loginKey.value.trim();
+    if (!key) return;
+    managementKey = key;
+    setBusy(loginButton, true, 'login.checking');
+    try {
+      const payload = await api(STATE_URL);
+      loginKey.value = '';
+      showContent();
+      // Keep edits made before a mid-session rejection instead of reloading over them.
+      if (state.loaded && isDirty()) {
+        refreshDirtyUI();
+        setLog('idle', 'log.keptEdits');
+      } else {
+        ingestState(payload);
+      }
+    } catch (error) {
+      if (isAuthError(error) || !error.status) {
+        showLogin('login.failed', error.message);
+      } else {
+        // CPA accepted the key; only the plugin failed, so show the error in place.
+        loginKey.value = '';
+        showContent();
+        setHealth('error', 'health.error');
+        setLog('error', 'log.loadFailed', { msg: error.message });
+      }
+    } finally {
+      setBusy(loginButton, false, 'login.checking');
+    }
   });
+
+  async function start() {
+    applyStaticI18n();
+    managementKey = readPanelKey();
+    if (!managementKey) { showLogin(); return; }
+    // Stay on the loading state until the remembered key is confirmed.
+    try {
+      await loadAll();
+      showContent();
+    } catch (error) {
+      if (isAuthError(error)) { showLogin(); return; }
+      showContent();
+      setHealth('error', 'health.error');
+      setLog('error', 'log.loadFailed', { msg: error.message });
+    }
+  }
+
+  start();
 })();
 </script>
 </body>

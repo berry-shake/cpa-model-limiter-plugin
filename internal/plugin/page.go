@@ -24,10 +24,12 @@ func panelResponse(allowedOrigins []string) pluginapi.ManagementResponse {
 	}
 }
 
+// buildCSP always allows same-origin framing so the CPA management panel can
+// embed the page and share its remembered management key.
 func buildCSP(allowedOrigins []string) string {
-	frameAncestors := "'none'"
+	frameAncestors := "'self'"
 	if len(allowedOrigins) > 0 {
-		frameAncestors = "'self' " + strings.Join(allowedOrigins, " ")
+		frameAncestors += " " + strings.Join(allowedOrigins, " ")
 	}
 	return strings.Join([]string{
 		"default-src 'none'",

@@ -62,7 +62,14 @@ type resourceDeclaration struct {
 	Description string `json:"description,omitempty"`
 }
 
+type routeDeclaration struct {
+	Method      string `json:"method"`
+	Path        string `json:"path"`
+	Description string `json:"description,omitempty"`
+}
+
 type managementRegistration struct {
+	Routes    []routeDeclaration    `json:"routes,omitempty"`
 	Resources []resourceDeclaration `json:"resources,omitempty"`
 }
 
@@ -118,7 +125,7 @@ func (s *Service) Call(method string, request []byte) []byte {
 					{
 						Name:        configAllowedOrigins,
 						Type:        pluginapi.ConfigFieldTypeString,
-						Description: "受信任的来源列表（逗号分隔），允许以 iframe 嵌入面板并跨源调用资源接口。留空为最严格默认：禁止任何 iframe 嵌入（frame-ancestors 'none'），并拒绝跨源浏览器请求。",
+						Description: "额外允许以 iframe 嵌入面板页面的来源列表（逗号分隔）。留空时只允许同源（CPA 管理面板）嵌入（frame-ancestors 'self'）。数据接口走 /v0/management，始终需要管理密钥。",
 					},
 				},
 			},
@@ -140,13 +147,14 @@ func (s *Service) Call(method string, request []byte) []byte {
 		return okEnvelope(s.Authenticate(req))
 	case pluginabi.MethodManagementRegister:
 		return okEnvelope(managementRegistration{
+			// The panel page and logo are browser-navigable resources without
+			// data; the endpoints behind them require the management key.
+			Routes: []routeDeclaration{
+				{Method: http.MethodGet, Path: statePath, Description: "List host api-keys and model restriction rules."},
+				{Method: http.MethodPost, Path: applyPath, Description: "Replace model restriction rules and rewrite config.yaml."},
+			},
 			Resources: []resourceDeclaration{
 				{Path: "/panel", Menu: "Model Limiter", Description: "Edit per-key model restrictions."},
-				// /state and /apply back the panel page; /logo.png is loaded
-				// as the sidebar icon. Menu is empty so they stay out of the
-				// management panel sidebar.
-				{Path: "/state"},
-				{Path: "/apply"},
 				{Path: "/logo.png"},
 			},
 		})
@@ -190,8 +198,7 @@ func (s *Service) snapshot() Config {
 }
 
 // AllowedOrigins returns a defensive copy of the configured trusted origins.
-// An empty result means the strictest default: iframe embedding is denied
-// and cross-origin browser requests to /state and /apply are rejected.
+// An empty result keeps panel embedding same-origin only.
 func (s *Service) AllowedOrigins() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

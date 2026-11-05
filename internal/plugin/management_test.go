@@ -1,7 +1,6 @@
 package plugin
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -56,16 +55,15 @@ func TestApplyEndpointWritesAndReflectsUpdatedState(t *testing.T) {
 		{APIKey: "sk-beta", Models: []string{"claude-*"}},
 		{APIKey: "sk-alpha", Models: []string{"gpt-5.2"}},
 	}
-	raw, errMarshal := json.Marshal(payload)
+	raw, errMarshal := json.Marshal(applyRequest{Rules: &payload})
 	if errMarshal != nil {
 		t.Fatal(errMarshal)
 	}
-	encoded := base64.RawURLEncoding.EncodeToString(raw)
 
 	resp := service.handleManagement(managementRPCRequest{
-		Method: http.MethodGet,
+		Method: http.MethodPost,
 		Path:   applyPath,
-		Query:  map[string][]string{"rules": {encoded}},
+		Body:   raw,
 	})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d body = %s", resp.StatusCode, resp.Body)
@@ -108,11 +106,10 @@ keys:
     models: [gpt-5.2]
 `))
 
-	encoded := base64.RawURLEncoding.EncodeToString([]byte("[]"))
 	resp := service.handleManagement(managementRPCRequest{
-		Method: http.MethodGet,
+		Method: http.MethodPost,
 		Path:   applyPath,
-		Query:  map[string][]string{"rules": {encoded}},
+		Body:   []byte(`{"rules":[]}`),
 	})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d body = %s", resp.StatusCode, resp.Body)
@@ -131,40 +128,44 @@ func TestApplyEndpointRejectsBadPayload(t *testing.T) {
 	service := New("0.1.3", nil, fakeHostKeys("sk-alpha"))
 	service.writer = newConfigWriter(func() string { return newTempConfig(t, sampleConfig) })
 
-	missing := service.handleManagement(managementRPCRequest{Method: http.MethodGet, Path: applyPath})
-	if missing.StatusCode != http.StatusBadRequest || !strings.Contains(string(missing.Body), "missing_rules") {
+	post := func(body string) pluginapi.ManagementResponse {
+		return service.handleManagement(managementRPCRequest{Method: http.MethodPost, Path: applyPath, Body: []byte(body)})
+	}
+	if missing := post(`{}`); missing.StatusCode != http.StatusBadRequest || !strings.Contains(string(missing.Body), "missing_rules") {
 		t.Fatalf("missing rules response = %d %s", missing.StatusCode, missing.Body)
 	}
-	badBase64 := service.handleManagement(managementRPCRequest{
-		Method: http.MethodGet,
-		Path:   applyPath,
-		Query:  map[string][]string{"rules": {"%%not-base64%%"}},
-	})
-	if badBase64.StatusCode != http.StatusBadRequest || !strings.Contains(string(badBase64.Body), "invalid_rules") {
-		t.Fatalf("bad base64 response = %d %s", badBase64.StatusCode, badBase64.Body)
+	if empty := post(""); empty.StatusCode != http.StatusBadRequest || !strings.Contains(string(empty.Body), "invalid_rules") {
+		t.Fatalf("empty body response = %d %s", empty.StatusCode, empty.Body)
 	}
-	badJSON := service.handleManagement(managementRPCRequest{
-		Method: http.MethodGet,
-		Path:   applyPath,
-		Query:  map[string][]string{"rules": {base64.RawURLEncoding.EncodeToString([]byte("not json"))}},
-	})
-	if badJSON.StatusCode != http.StatusBadRequest {
-		t.Fatalf("bad json response = %d", badJSON.StatusCode)
+	if badJSON := post("not json"); badJSON.StatusCode != http.StatusBadRequest || !strings.Contains(string(badJSON.Body), "invalid_rules") {
+		t.Fatalf("bad json response = %d %s", badJSON.StatusCode, badJSON.Body)
 	}
-	duplicate := service.handleManagement(managementRPCRequest{
-		Method: http.MethodGet,
-		Path:   applyPath,
-		Query:  map[string][]string{"rules": {base64.RawURLEncoding.EncodeToString([]byte(`[{"api_key":"sk-a"},{"api_key":"sk-a"}]`))}},
-	})
-	if duplicate.StatusCode != http.StatusBadRequest || !strings.Contains(string(duplicate.Body), "apply_failed") {
+	if notArray := post(`{"rules":{"api_key":"sk-a"}}`); notArray.StatusCode != http.StatusBadRequest {
+		t.Fatalf("non-array rules response = %d %s", notArray.StatusCode, notArray.Body)
+	}
+	if duplicate := post(`{"rules":[{"api_key":"sk-a"},{"api_key":"sk-a"}]}`); duplicate.StatusCode != http.StatusBadRequest || !strings.Contains(string(duplicate.Body), "apply_failed") {
 		t.Fatalf("duplicate api-key response = %d %s", duplicate.StatusCode, duplicate.Body)
 	}
 }
 
-func TestApplyEndpointRejectsPost(t *testing.T) {
+// A GET must never mutate rules, so a stray navigation cannot rewrite config.yaml.
+func TestApplyEndpointRejectsGet(t *testing.T) {
 	t.Parallel()
 	service := New("0.1.3", nil, fakeHostKeys("sk-alpha"))
-	resp := service.handleManagement(managementRPCRequest{Method: http.MethodPost, Path: applyPath})
+	resp := service.handleManagement(managementRPCRequest{
+		Method: http.MethodGet,
+		Path:   applyPath,
+		Query:  map[string][]string{"rules": {"W10"}},
+	})
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+}
+
+func TestStateEndpointRejectsPost(t *testing.T) {
+	t.Parallel()
+	service := New("0.1.3", nil, fakeHostKeys("sk-alpha"))
+	resp := service.handleManagement(managementRPCRequest{Method: http.MethodPost, Path: statePath})
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}
@@ -179,8 +180,8 @@ func TestPanelResponseAppliesFrameAncestors(t *testing.T) {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}
 	csp := resp.Headers.Get("Content-Security-Policy")
-	if !strings.Contains(csp, "frame-ancestors 'none'") {
-		t.Fatalf("empty allowed_origins must forbid iframe embedding; csp = %q", csp)
+	if !strings.HasSuffix(csp, "frame-ancestors 'self'") {
+		t.Fatalf("empty allowed_origins must allow only the same-origin panel; csp = %q", csp)
 	}
 
 	service.Call("plugin.register", registerPayload(t, "allowed_origins: 'https://ops.example.com , https://ops.example.com/'\n"))
@@ -194,75 +195,19 @@ func TestPanelResponseAppliesFrameAncestors(t *testing.T) {
 	}
 }
 
-func TestStateEndpointRejectsCrossOriginByDefault(t *testing.T) {
+// The panel page must call the authenticated Management API routes and send
+// the management key; the old unauthenticated resource endpoints are gone.
+func TestPanelPageUsesManagementRoutes(t *testing.T) {
 	t.Parallel()
-
-	service := New("0.1.3", nil, fakeHostKeys("sk-alpha"))
-
-	// A CLI request with no browser context headers is allowed.
-	bare := service.handleManagement(managementRPCRequest{Method: http.MethodGet, Path: statePath})
-	if bare.StatusCode != http.StatusOK {
-		t.Fatalf("bare CLI request should pass; status = %d body = %s", bare.StatusCode, bare.Body)
+	page := string(panelPage)
+	for _, want := range []string{statePath, applyPath, "Authorization", "'Bearer '", "cli-proxy-auth"} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("panel page should reference %q", want)
+		}
 	}
-
-	// A same-origin GET from the panel page is allowed via Sec-Fetch-Site.
-	sameOrigin := service.handleManagement(managementRPCRequest{
-		Method:  http.MethodGet,
-		Path:    statePath,
-		Headers: http.Header{"Sec-Fetch-Site": {"same-origin"}},
-	})
-	if sameOrigin.StatusCode != http.StatusOK {
-		t.Fatalf("same-origin request should pass; status = %d", sameOrigin.StatusCode)
-	}
-
-	// A cross-origin fetch is rejected regardless of what Origin claims.
-	crossOrigin := service.handleManagement(managementRPCRequest{
-		Method:  http.MethodGet,
-		Path:    statePath,
-		Headers: http.Header{"Origin": {"https://attacker.example"}},
-	})
-	if crossOrigin.StatusCode != http.StatusForbidden {
-		t.Fatalf("cross-origin request must be forbidden; status = %d body = %s", crossOrigin.StatusCode, crossOrigin.Body)
-	}
-	if !strings.Contains(string(crossOrigin.Body), "origin_not_allowed") {
-		t.Fatalf("response should identify origin rejection; body = %s", crossOrigin.Body)
-	}
-
-	// Referer-only cross-origin without allowed_origins is treated as ambiguous
-	// (CLI or legacy browser) and passes.
-	refererOnly := service.handleManagement(managementRPCRequest{
-		Method:  http.MethodGet,
-		Path:    statePath,
-		Headers: http.Header{"Referer": {"https://ops.example.com/panel"}},
-	})
-	if refererOnly.StatusCode != http.StatusOK {
-		t.Fatalf("referer-only without allowed_origins should pass; status = %d", refererOnly.StatusCode)
-	}
-}
-
-func TestStateEndpointAcceptsListedOrigin(t *testing.T) {
-	t.Parallel()
-
-	service := New("0.1.3", nil, fakeHostKeys("sk-alpha"))
-	service.Call("plugin.register", registerPayload(t, "allowed_origins: 'https://ops.example.com'\n"))
-
-	allowed := service.handleManagement(managementRPCRequest{
-		Method:  http.MethodGet,
-		Path:    statePath,
-		Headers: http.Header{"Origin": {"https://ops.example.com"}},
-	})
-	if allowed.StatusCode != http.StatusOK {
-		t.Fatalf("listed origin must pass; status = %d body = %s", allowed.StatusCode, allowed.Body)
-	}
-
-	// Once allowed_origins is set, an unlisted Referer becomes a positive
-	// cross-origin signal and is rejected.
-	rejected := service.handleManagement(managementRPCRequest{
-		Method:  http.MethodGet,
-		Path:    statePath,
-		Headers: http.Header{"Referer": {"https://attacker.example/x"}},
-	})
-	if rejected.StatusCode != http.StatusForbidden {
-		t.Fatalf("unlisted referer with allowed_origins configured must be rejected; status = %d", rejected.StatusCode)
+	for _, stale := range []string{"/v0/resource/plugins/model-limiter/state", "/v0/resource/plugins/model-limiter/apply", "?rules="} {
+		if strings.Contains(page, stale) {
+			t.Fatalf("panel page still references %q", stale)
+		}
 	}
 }
